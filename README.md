@@ -52,19 +52,17 @@ Example output:
 
 ## Status
 
-This repository currently contains the project documentation and implementation plan. The API client and report generator should be added under the structure below:
+The repository includes a small Python API smoke-test client. It calls the person-list endpoint and prints the decoded JSON response. The customer health-check analysis can build on this client as the next step.
 
 ```text
 .
 ├── README.md
 ├── .env.example
 ├── .gitignore
-├── src/
-│   ├── api_client.*
-│   ├── health_check.*
-│   ├── models.*
-│   └── cli.*
+├── app.py
+├── requirements.txt
 └── tests/
+    └── test_app.py
 ```
 
 ## Setup
@@ -84,7 +82,27 @@ This repository currently contains the project documentation and implementation 
    PAULSJOB_BASE_URL=https://api.paulsjob.ai/dev
    ```
 
-5. Install the project dependencies and run the health check command for the selected customer.
+5. Create and activate a virtual environment, then install the dependencies:
+
+   ```bash
+   python3 -m venv .venv
+   source .venv/bin/activate
+   python -m pip install -r requirements.txt
+   ```
+
+6. Run the API smoke test:
+
+   ```bash
+   python app.py
+   ```
+
+   The response is printed as formatted JSON. The current smoke test sends an empty JSON object; add the request fields required by the OpenAPI schema in `app.py` when the endpoint filters are confirmed.
+
+7. Run the tests without making a network request:
+
+   ```bash
+   python -m pytest
+   ```
 
 The API key must only be read from the environment. It must never be committed, printed in logs, or included in example output.
 
@@ -101,7 +119,7 @@ The implementation uses the Paul's Job API resources required to construct a cus
 | Agents | Check whether configured agents are present and active |
 | Applications | Aggregate candidate counts by pipeline step and identify aging records |
 
-The exact paths, parameters, pagination behavior, and response schemas are taken from the [Paul's Job API OpenAPI documentation](https://api.paulsjob.ai/dev/docs), which is the source of truth for the client implementation.
+The current client calls `POST /company/person/list`. Authentication uses the `x-company-api-key` header with the company API key. The request body is intentionally supplied through `--payload-file` because the OpenAPI schema defines the required filters and fields. The [Paul's Job API OpenAPI documentation](https://api.paulsjob.ai/dev/docs) is the source of truth for that schema.
 
 ## Health rules
 
@@ -168,4 +186,3 @@ The client and health rules should be tested independently using mocked API resp
 ## Security
 
 Never commit an API key. Keep `.env` in `.gitignore`, commit only `.env.example`, and check generated reports and screenshots for customer or credential data before sharing them.
-
