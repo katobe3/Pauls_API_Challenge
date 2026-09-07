@@ -52,7 +52,7 @@ Example output:
 
 ## Status
 
-The repository includes a small Python API smoke-test client. It calls the person-list endpoint and prints the decoded JSON response. The customer health-check analysis can build on this client as the next step.
+The repository includes a small Python API client. It calls the jobs search endpoint, follows all result pages, and prints the combined job list. The customer health-check analysis can build on this client as the next step.
 
 ```text
 .
@@ -96,7 +96,7 @@ The repository includes a small Python API smoke-test client. It calls the perso
    python app.py
    ```
 
-   The response is printed as formatted JSON. The current smoke test sends an empty JSON object; add the request fields required by the OpenAPI schema in `app.py` when the endpoint filters are confirmed.
+   The combined job list is printed as formatted JSON. The client requests up to 100 jobs per page and follows `TotalPage` until every page has been collected.
 
 7. Run the tests without making a network request:
 
@@ -119,7 +119,7 @@ The implementation uses the Paul's Job API resources required to construct a cus
 | Agents | Check whether configured agents are present and active |
 | Applications | Aggregate candidate counts by pipeline step and identify aging records |
 
-The current client calls `POST /company/person/list`. Authentication uses the `x-company-api-key` header with the company API key. The request body is intentionally supplied through `--payload-file` because the OpenAPI schema defines the required filters and fields. The [Paul's Job API OpenAPI documentation](https://api.paulsjob.ai/dev/docs) is the source of truth for that schema.
+The current client calls `POST /recruiting/jobs/search-jobs`. Authentication uses the `x-company-api-key` header with the company API key. The current smoke test sends an empty JSON object; add the request fields required by the jobs search schema in `app.py` once the filters are confirmed. The [Paul's Job API OpenAPI documentation](https://api.paulsjob.ai/dev/docs) is the source of truth for that schema.
 
 ## Health rules
 
