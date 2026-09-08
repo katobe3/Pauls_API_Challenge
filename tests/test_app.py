@@ -2,8 +2,10 @@ import pytest
 
 from app import (
     ApiError,
+    add_application_details_to_steps,
     add_pipeline_template_names,
     fetch_all_jobs,
+    fetch_applications_for_step,
     get_pipeline_template_name,
     get_pipeline_steps,
     get_step_agents,
@@ -153,6 +155,10 @@ def test_add_pipeline_template_names_deduplicates_lookups(monkeypatch):
     monkeypatch.setattr("app.get_pipeline_template_name", fake_get_pipeline_template_name)
     monkeypatch.setattr("app.get_pipeline_steps", fake_get_pipeline_steps)
     monkeypatch.setattr("app.add_agent_details_to_steps", fake_add_agent_details_to_steps)
+    monkeypatch.setattr(
+        "app.add_application_details_to_steps",
+        lambda steps, **kwargs: steps,
+    )
 
     jobs = add_pipeline_template_names(
         [
@@ -292,3 +298,55 @@ def test_add_agent_details_to_steps_marks_steps_without_agents(monkeypatch):
             "Agents": [],
         }
     ]
+
+
+def test_fetch_applications_for_step_paginates_and_filters_job_and_step(monkeypatch):
+    requests_seen = []
+    pages = {
+        1: {"data": {"JobApplications": [{"id": 1}], "TotalPage": 2}},
+        2: {"data": {"JobApplications": [{"id": 2}], "TotalPage": 2}},
+    }
+
+    def fake_post(url, *, headers, json, timeout):
+        requests_seen.append(json)
+        return FakeResponse(payload=pages[json["Page"]])
+
+    monkeypatch.setattr("app.requests.post", fake_post)
+
+    result = fetch_applications_for_step(
+        api_key="secret",
+        base_url="https://api.example.test/dev",
+        job_id=99,
+        step_name="Application review",
+    )
+
+    assert result == [{"id": 1}, {"id": 2}]
+    assert requests_seen[0] == {
+        "Must": [
+            {"Key": "paulsjob_job_id", "Operator": "is", "Value": 99},
+            {
+                "Key": "app_status_name",
+                "Operator": "is",
+                "Value": "Application review",
+            },
+        ],
+        "Page": 1,
+        "PerPage": 100,
+    }
+
+
+def test_add_application_details_to_steps_adds_count(monkeypatch):
+    monkeypatch.setattr(
+        "app.fetch_applications_for_step",
+        lambda **kwargs: [{"id": 1}, {"id": 2}],
+    )
+
+    result = add_application_details_to_steps(
+        [{"ID": "step-1", "Name": "Application review"}],
+        api_key="secret",
+        base_url="https://api.example.test/dev",
+        job_id=99,
+    )
+
+    assert result[0]["Applications"] == [{"id": 1}, {"id": 2}]
+    assert result[0]["ApplicationCount"] == 2

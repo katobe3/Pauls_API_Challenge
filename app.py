@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 DEFAULT_BASE_URL = "https://api.paulsjob.ai/dev"
 ENDPOINT = "/recruiting/jobs/search-jobs"
 PIPELINE_TEMPLATE_ENDPOINT = "/recruiting/job-step-templates/pipelines"
+APPLICATION_ENDPOINT = "/recruiting/applications/search-applications"
 
 
 class ApiError(RuntimeError):
@@ -287,6 +288,137 @@ def add_agent_details_to_steps(
     return enriched_steps
 
 
+def search_applications(
+    *,
+    api_key: str,
+    base_url: str,
+    payload: dict[str, Any],
+    timeout: float = 20.0,
+) -> Any:
+    """POST to the application search endpoint and return decoded JSON."""
+
+    response = requests.post(
+        f"{base_url}{APPLICATION_ENDPOINT}",
+        headers={
+            "Accept": "application/json",
+            "x-company-api-key": api_key,
+            "Content-Type": "application/json",
+        },
+        json=payload,
+        timeout=timeout,
+    )
+
+    if not response.ok:
+        detail = response.text.strip()
+        raise ApiError(
+            f"Application search failed with HTTP {response.status_code}"
+            + (f": {detail[:500]}" if detail else ".")
+        )
+
+    try:
+        return response.json()
+    except ValueError as exc:
+        raise ApiError("The application search response was not JSON.") from exc
+
+
+def fetch_applications_for_step(
+    *,
+    api_key: str,
+    base_url: str,
+    job_id: int | str,
+    step_name: str,
+    per_page: int = 100,
+    timeout: float = 20.0,
+) -> list[dict[str, Any]]:
+    """Fetch applications currently assigned to one job step."""
+
+    if not 1 <= per_page <= 100:
+        raise ValueError("per_page must be between 1 and 100.")
+
+    applications: list[dict[str, Any]] = []
+    page = 1
+
+    while True:
+        result = search_applications(
+            api_key=api_key,
+            base_url=base_url,
+            payload={
+                "Must": [
+                    {
+                        "Key": "paulsjob_job_id",
+                        "Operator": "is",
+                        "Value": job_id,
+                    },
+                    {
+                        "Key": "app_status_name",
+                        "Operator": "is",
+                        "Value": step_name,
+                    },
+                ],
+                "Page": page,
+                "PerPage": per_page,
+            },
+            timeout=timeout,
+        )
+
+        data = result.get("data") if isinstance(result, dict) else None
+        if not isinstance(data, dict):
+            raise ApiError("The application search response did not contain a valid data object.")
+
+        page_applications = data.get("JobApplications", [])
+        if not isinstance(page_applications, list):
+            raise ApiError("The application search response did not contain JobApplications.")
+
+        applications.extend(
+            application
+            for application in page_applications
+            if isinstance(application, dict)
+        )
+
+        total_pages = data.get("TotalPage", 0) or 0
+        if page >= total_pages or not page_applications:
+            return applications
+
+        page += 1
+
+
+def add_application_details_to_steps(
+    steps: list[dict[str, Any]],
+    *,
+    api_key: str,
+    base_url: str,
+    job_id: int | str,
+    timeout: float = 20.0,
+) -> list[dict[str, Any]]:
+    """Add current applications and their count to each job step."""
+
+    enriched_steps: list[dict[str, Any]] = []
+    applications_by_step_name: dict[str, list[dict[str, Any]]] = {}
+
+    for step in steps:
+        enriched_step = dict(step)
+        step_name = step.get("Name")
+
+        if isinstance(step_name, str) and step_name:
+            if step_name not in applications_by_step_name:
+                applications_by_step_name[step_name] = fetch_applications_for_step(
+                    api_key=api_key,
+                    base_url=base_url,
+                    job_id=job_id,
+                    step_name=step_name,
+                    timeout=timeout,
+                )
+            applications = applications_by_step_name[step_name]
+        else:
+            applications = []
+
+        enriched_step["Applications"] = applications
+        enriched_step["ApplicationCount"] = len(applications)
+        enriched_steps.append(enriched_step)
+
+    return enriched_steps
+
+
 def add_pipeline_template_names(
     jobs: list[dict[str, Any]],
     *,
@@ -327,7 +459,18 @@ def add_pipeline_template_names(
                 )
             pipeline_name, pipeline_steps = details_by_id[pipeline_template_id]
             enriched_job["PipelineTemplateName"] = pipeline_name
-            enriched_job["PipelineSteps"] = pipeline_steps
+            job_id = job.get("PaulsjobJobID")
+            enriched_job["PipelineSteps"] = (
+                add_application_details_to_steps(
+                    pipeline_steps,
+                    api_key=api_key,
+                    base_url=base_url,
+                    job_id=job_id,
+                    timeout=timeout,
+                )
+                if job_id is not None
+                else pipeline_steps
+            )
         else:
             enriched_job["PipelineTemplateName"] = None
             enriched_job["PipelineSteps"] = []
