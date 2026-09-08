@@ -1,10 +1,12 @@
-"""Call the Paul's Job jobs search endpoint and print its response."""
+"""Generate a static Customer Health Check report from the Paul's Job API."""
 
 from __future__ import annotations
 
-import json
 import os
 import sys
+from datetime import datetime, timezone
+from html import escape
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
@@ -16,6 +18,7 @@ DEFAULT_BASE_URL = "https://api.paulsjob.ai/dev"
 ENDPOINT = "/recruiting/jobs/search-jobs"
 PIPELINE_TEMPLATE_ENDPOINT = "/recruiting/job-step-templates/pipelines"
 APPLICATION_ENDPOINT = "/recruiting/applications/search-applications"
+REPORT_PATH = Path("report.html")
 
 
 class ApiError(RuntimeError):
@@ -480,6 +483,224 @@ def add_pipeline_template_names(
     return enriched_jobs
 
 
+def _text(value: Any, fallback: str = "—") -> str:
+    """Return a safely escaped display value for the HTML report."""
+
+    if value is None or value == "":
+        return fallback
+    return escape(str(value))
+
+
+def _application_display_name(application: dict[str, Any]) -> str:
+    person = application.get("Person")
+    if isinstance(person, dict):
+        return _text(person.get("FullName"), "Unnamed candidate")
+    return "Unnamed candidate"
+
+
+def _render_applications(applications: list[dict[str, Any]]) -> str:
+    if not applications:
+        return '<span class="muted">No current applications</span>'
+
+    application_rows = []
+    for application in applications:
+        application_data = application.get("Application")
+        application_data = application_data if isinstance(application_data, dict) else {}
+        application_rows.append(
+            "<li>"
+            f"<strong>{_application_display_name(application)}</strong>"
+            f"<span>{_text(application_data.get('Source'), 'Unknown source')} · "
+            f"{_text(application_data.get('ApplicationDate'), 'Unknown date')}</span>"
+            "</li>"
+        )
+
+    return (
+        '<details class="application-details">'
+        f"<summary>View {len(applications)} application(s)</summary>"
+        f"<ul>{''.join(application_rows)}</ul>"
+        "</details>"
+    )
+
+
+def _render_agents(agents: list[dict[str, Any]]) -> str:
+    if not agents:
+        return '<span class="status neutral">No agent</span>'
+
+    agent_items = []
+    for agent in agents:
+        instructions = agent.get("Instructions")
+        instructions = instructions if isinstance(instructions, dict) else {}
+        prompt = _text(instructions.get("SystemPrompt"), "No system prompt configured")
+        agent_items.append(
+            '<div class="agent">'
+            f"<strong>{_text(agent.get('Name'), 'Unnamed agent')}</strong>"
+            "<details>"
+            "<summary>System prompt</summary>"
+            f"<pre>{prompt}</pre>"
+            "</details>"
+            "</div>"
+        )
+
+    return '<span class="status positive">Agent configured</span>' + "".join(agent_items)
+
+
+def _render_steps(steps: list[dict[str, Any]]) -> str:
+    if not steps:
+        return '<p class="empty-state">No pipeline steps are configured for this job.</p>'
+
+    rows = []
+    for step in sorted(steps, key=lambda item: item.get("OrderIndex", 0)):
+        hidden = bool(step.get("IsHidden"))
+        applications = step.get("Applications", [])
+        applications = applications if isinstance(applications, list) else []
+        rows.append(
+            "<tr>"
+            "<td>"
+            f"<span class=\"step-number\">{_text(step.get('OrderIndex'), '?')}</span>"
+            f"<strong>{_text(step.get('Name'), 'Unnamed step')}</strong>"
+            f"<small>{_text(step.get('Category'), 'No category')}</small>"
+            "</td>"
+            f"<td><span class=\"status {'neutral' if hidden else 'positive'}\">"
+            f"{'Hidden' if hidden else 'Active'}</span></td>"
+            f"<td>{_render_agents(step.get('Agents', []))}</td>"
+            "<td>"
+            f"<span class=\"application-count\">{len(applications)}</span>"
+            f"{_render_applications(applications)}"
+            "</td>"
+            "</tr>"
+        )
+
+    return (
+        '<div class="table-wrap"><table>'
+        "<thead><tr><th>Pipeline step</th><th>Status</th>"
+        "<th>Agent configuration</th><th>Applications</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody></table></div>"
+    )
+
+
+def render_html_report(jobs: list[dict[str, Any]]) -> str:
+    """Render the current job, pipeline, agent, and application data as HTML."""
+
+    pipeline_ids = {
+        job.get("PipelineTemplateID")
+        for job in jobs
+        if isinstance(job.get("PipelineTemplateID"), str)
+    }
+    steps = [
+        step
+        for job in jobs
+        for step in job.get("PipelineSteps", [])
+        if isinstance(step, dict)
+    ]
+    application_count = sum(
+        step.get("ApplicationCount", 0)
+        for step in steps
+        if isinstance(step.get("ApplicationCount"), int)
+    )
+
+    job_sections = []
+    for job in jobs:
+        pipeline_name = _text(job.get("PipelineTemplateName"), "No pipeline assigned")
+        title = _text(job.get("JobPositionTitle"), "Untitled job")
+        job_id = _text(job.get("PaulsjobJobID"), "Unknown ID")
+        published = bool(job.get("Published"))
+        expired = bool(job.get("Expired"))
+        job_state = "Expired" if expired else "Published" if published else "Draft"
+        state_class = "negative" if expired else "positive" if published else "neutral"
+        job_sections.append(
+            '<section class="job-card">'
+            '<div class="job-heading">'
+            "<div>"
+            f"<p class=\"eyebrow\">JOB {job_id}</p><h2>{title}</h2>"
+            f"<p class=\"pipeline-name\">{pipeline_name}</p>"
+            "</div>"
+            f"<span class=\"status {state_class}\">{job_state}</span>"
+            "</div>"
+            '<dl class="job-meta">'
+            f"<div><dt>Location</dt><dd>{_text(job.get('Location'))}</dd></div>"
+            f"<div><dt>Created</dt><dd>{_text(job.get('CreatedAt'))}</dd></div>"
+            f"<div><dt>Pipeline ID</dt><dd>{_text(job.get('PipelineTemplateID'))}</dd></div>"
+            "</dl>"
+            f"{_render_steps(job.get('PipelineSteps', []))}"
+            "</section>"
+        )
+
+    generated_at = datetime.now(timezone.utc).strftime("%d %b %Y, %H:%M UTC")
+    empty_message = (
+        '<section class="empty-state"><h2>No jobs found</h2>'
+        "<p>The API returned no jobs for this company.</p></section>"
+        if not job_sections
+        else ""
+    )
+
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PJRI Customer Health Check</title>
+  <style>
+    :root {{
+      --ink: #17203a; --muted: #68718b; --line: #e6e9f2; --canvas: #f5f7fb;
+      --card: #fff; --brand: #6254e7; --brand-soft: #eeecff; --good: #10705b;
+      --good-soft: #e5f6ef; --warn: #8a5b11; --warn-soft: #fff4df; --bad: #b53a50;
+      --bad-soft: #ffe9ee;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{ margin: 0; background: var(--canvas); color: var(--ink); font: 15px/1.5 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }}
+    .shell {{ max-width: 1280px; margin: 0 auto; padding: 48px 24px 72px; }}
+    .hero {{ display: flex; justify-content: space-between; gap: 32px; align-items: end; margin-bottom: 28px; }}
+    .eyebrow {{ margin: 0 0 8px; color: var(--brand); font-weight: 800; font-size: 12px; letter-spacing: .12em; }}
+    h1 {{ font-size: clamp(32px, 5vw, 48px); line-height: 1.05; margin: 0; letter-spacing: -.04em; }}
+    h2 {{ margin: 0; font-size: 21px; letter-spacing: -.02em; }}
+    .generated {{ color: var(--muted); font-size: 13px; white-space: nowrap; }}
+    .metrics {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; margin-bottom: 28px; }}
+    .metric, .job-card, .empty-state {{ background: var(--card); border: 1px solid var(--line); border-radius: 16px; box-shadow: 0 10px 26px rgba(31, 41, 74, .05); }}
+    .metric {{ padding: 20px; }}
+    .metric span {{ display: block; color: var(--muted); font-size: 13px; }}
+    .metric strong {{ display: block; font-size: 30px; margin-top: 4px; letter-spacing: -.04em; }}
+    .job-card {{ padding: 28px; margin-top: 20px; }}
+    .job-heading {{ display: flex; justify-content: space-between; align-items: start; gap: 16px; }}
+    .pipeline-name {{ color: var(--brand); font-weight: 700; margin: 6px 0 0; }}
+    .job-meta {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin: 22px 0; }}
+    .job-meta div {{ background: #f8f9fd; padding: 12px; border-radius: 10px; min-width: 0; }}
+    dt {{ color: var(--muted); font-size: 12px; }} dd {{ margin: 2px 0 0; overflow-wrap: anywhere; }}
+    .status {{ display: inline-block; padding: 4px 9px; border-radius: 99px; font-size: 12px; font-weight: 800; white-space: nowrap; }}
+    .status.positive {{ background: var(--good-soft); color: var(--good); }} .status.neutral {{ background: var(--brand-soft); color: #5044bc; }} .status.negative {{ background: var(--bad-soft); color: var(--bad); }}
+    .table-wrap {{ overflow-x: auto; border: 1px solid var(--line); border-radius: 12px; }}
+    table {{ border-collapse: collapse; width: 100%; min-width: 760px; }} th, td {{ text-align: left; vertical-align: top; padding: 16px; border-bottom: 1px solid var(--line); }} tr:last-child td {{ border-bottom: 0; }} th {{ color: var(--muted); font-size: 12px; background: #fafbfe; }}
+    td strong, td small {{ display: block; }} td small {{ color: var(--muted); margin-top: 2px; }} .step-number {{ display: inline-grid; place-items: center; width: 22px; height: 22px; margin-right: 8px; border-radius: 6px; background: var(--brand-soft); color: var(--brand); font-size: 12px; font-weight: 800; }}
+    .agent + .agent {{ border-top: 1px solid var(--line); margin-top: 10px; padding-top: 10px; }} details {{ margin-top: 7px; }} summary {{ cursor: pointer; color: var(--brand); font-size: 13px; font-weight: 700; }} pre {{ margin: 8px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; background: #111827; color: #e5e7eb; padding: 12px; border-radius: 8px; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }}
+    .application-count {{ display: inline-grid; place-items: center; min-width: 28px; height: 28px; padding: 0 8px; border-radius: 99px; background: var(--brand); color: white; font-weight: 800; }} .application-details ul {{ padding-left: 18px; margin: 8px 0 0; }} .application-details li {{ margin: 6px 0; }} .application-details li span {{ display: block; color: var(--muted); font-size: 12px; }} .muted {{ color: var(--muted); font-size: 13px; }} .empty-state {{ padding: 32px; text-align: center; color: var(--muted); }}
+    @media (max-width: 720px) {{ .shell {{ padding: 28px 14px 48px; }} .hero {{ display: block; }} .generated {{ margin-top: 12px; }} .metrics, .job-meta {{ grid-template-columns: repeat(2, 1fr); }} .job-card {{ padding: 18px; }} }}
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="hero">
+      <div><p class="eyebrow">PJRI · CUSTOMER HEALTH CHECK</p><h1>Recruiting pipeline overview</h1></div>
+      <p class="generated">Generated {generated_at}</p>
+    </header>
+    <section class="metrics" aria-label="Report summary">
+      <article class="metric"><span>Jobs</span><strong>{len(jobs)}</strong></article>
+      <article class="metric"><span>Pipelines</span><strong>{len(pipeline_ids)}</strong></article>
+      <article class="metric"><span>Pipeline steps</span><strong>{len(steps)}</strong></article>
+      <article class="metric"><span>Current applications</span><strong>{application_count}</strong></article>
+    </section>
+    {empty_message}
+    {''.join(job_sections)}
+  </main>
+</body>
+</html>"""
+
+
+def write_html_report(jobs: list[dict[str, Any]], path: Path = REPORT_PATH) -> Path:
+    """Write the static report to disk and return its location."""
+
+    path.write_text(render_html_report(jobs), encoding="utf-8")
+    return path
+
+
 def main() -> int:
     try:
         api_key, base_url = load_config()
@@ -500,7 +721,8 @@ def main() -> int:
         print(f"Error: could not reach the Paul's Job API: {exc}", file=sys.stderr)
         return 1
 
-    print(json.dumps(jobs, indent=2, ensure_ascii=False))
+    report_path = write_html_report(jobs)
+    print(f"Report created: {report_path}")
     return 0
 
 

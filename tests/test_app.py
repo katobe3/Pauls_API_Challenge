@@ -9,7 +9,9 @@ from app import (
     get_pipeline_template_name,
     get_pipeline_steps,
     get_step_agents,
+    render_html_report,
     search_jobs,
+    write_html_report,
 )
 
 
@@ -350,3 +352,53 @@ def test_add_application_details_to_steps_adds_count(monkeypatch):
 
     assert result[0]["Applications"] == [{"id": 1}, {"id": 2}]
     assert result[0]["ApplicationCount"] == 2
+
+
+def test_render_html_report_includes_jobs_steps_agents_and_applications(tmp_path):
+    jobs = [
+        {
+            "PaulsjobJobID": 99,
+            "JobPositionTitle": "Customer Success Manager",
+            "Published": True,
+            "Location": "Berlin",
+            "PipelineTemplateID": "pipeline-123",
+            "PipelineTemplateName": "Standard pipeline",
+            "PipelineSteps": [
+                {
+                    "ID": "step-1",
+                    "Name": "Application review",
+                    "Category": "PreScreening",
+                    "OrderIndex": 1,
+                    "IsHidden": False,
+                    "ApplicationCount": 1,
+                    "Agents": [
+                        {
+                            "Name": "Screening agent",
+                            "Instructions": {"SystemPrompt": "Check <requirements>."},
+                        }
+                    ],
+                    "Applications": [
+                        {
+                            "Person": {"FullName": "Ada Lovelace"},
+                            "Application": {
+                                "Source": "Career page",
+                                "ApplicationDate": "2026-09-08",
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+    ]
+
+    report = render_html_report(jobs)
+    report_path = write_html_report(jobs, tmp_path / "report.html")
+
+    assert "Recruiting pipeline overview" in report
+    assert "Customer Success Manager" in report
+    assert "Standard pipeline" in report
+    assert "Screening agent" in report
+    assert "Ada Lovelace" in report
+    assert "Check &lt;requirements&gt;." in report
+    assert "Current applications</span><strong>1" in report
+    assert report_path.read_text(encoding="utf-8") == report
