@@ -157,6 +157,45 @@ def get_pipeline_template_name(
     return name
 
 
+def get_pipeline_steps(
+    *,
+    api_key: str,
+    base_url: str,
+    pipeline_template_id: str,
+    timeout: float = 20.0,
+) -> list[dict[str, Any]]:
+    """Retrieve all step templates belonging to a pipeline template."""
+
+    encoded_id = quote(pipeline_template_id, safe="")
+    response = requests.get(
+        f"{base_url}{PIPELINE_TEMPLATE_ENDPOINT}/{encoded_id}/steps",
+        headers={
+            "Accept": "application/json",
+            "x-company-api-key": api_key,
+        },
+        timeout=timeout,
+    )
+
+    if not response.ok:
+        detail = response.text.strip()
+        raise ApiError(
+            f"Pipeline steps request failed with HTTP {response.status_code}"
+            + (f": {detail[:500]}" if detail else ".")
+        )
+
+    try:
+        result = response.json()
+    except ValueError as exc:
+        raise ApiError("The pipeline steps response was not JSON.") from exc
+
+    data = result.get("data") if isinstance(result, dict) else None
+    steps = data.get("JobStepTemplates") if isinstance(data, dict) else None
+    if not isinstance(steps, list):
+        raise ApiError("The pipeline steps response did not contain JobStepTemplates.")
+
+    return [step for step in steps if isinstance(step, dict)]
+
+
 def add_pipeline_template_names(
     jobs: list[dict[str, Any]],
     *,
@@ -164,9 +203,9 @@ def add_pipeline_template_names(
     base_url: str,
     timeout: float = 20.0,
 ) -> list[dict[str, Any]]:
-    """Add the pipeline template name to every job that has a template ID."""
+    """Add pipeline template names and steps to every job with a template ID."""
 
-    names_by_id: dict[str, str] = {}
+    details_by_id: dict[str, tuple[str, list[dict[str, Any]]]] = {}
     enriched_jobs: list[dict[str, Any]] = []
 
     for job in jobs:
@@ -174,16 +213,27 @@ def add_pipeline_template_names(
         pipeline_template_id = job.get("PipelineTemplateID")
 
         if isinstance(pipeline_template_id, str) and pipeline_template_id:
-            if pipeline_template_id not in names_by_id:
-                names_by_id[pipeline_template_id] = get_pipeline_template_name(
-                    api_key=api_key,
-                    base_url=base_url,
-                    pipeline_template_id=pipeline_template_id,
-                    timeout=timeout,
+            if pipeline_template_id not in details_by_id:
+                details_by_id[pipeline_template_id] = (
+                    get_pipeline_template_name(
+                        api_key=api_key,
+                        base_url=base_url,
+                        pipeline_template_id=pipeline_template_id,
+                        timeout=timeout,
+                    ),
+                    get_pipeline_steps(
+                        api_key=api_key,
+                        base_url=base_url,
+                        pipeline_template_id=pipeline_template_id,
+                        timeout=timeout,
+                    ),
                 )
-            enriched_job["PipelineTemplateName"] = names_by_id[pipeline_template_id]
+            pipeline_name, pipeline_steps = details_by_id[pipeline_template_id]
+            enriched_job["PipelineTemplateName"] = pipeline_name
+            enriched_job["PipelineSteps"] = pipeline_steps
         else:
             enriched_job["PipelineTemplateName"] = None
+            enriched_job["PipelineSteps"] = []
 
         enriched_jobs.append(enriched_job)
 

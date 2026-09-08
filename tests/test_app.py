@@ -5,6 +5,7 @@ from app import (
     add_pipeline_template_names,
     fetch_all_jobs,
     get_pipeline_template_name,
+    get_pipeline_steps,
     search_jobs,
 )
 
@@ -123,13 +124,19 @@ def test_get_pipeline_template_name_uses_template_endpoint(monkeypatch):
 
 
 def test_add_pipeline_template_names_deduplicates_lookups(monkeypatch):
-    calls = []
+    name_calls = []
+    steps_calls = []
 
     def fake_get_pipeline_template_name(**kwargs):
-        calls.append(kwargs["pipeline_template_id"])
+        name_calls.append(kwargs["pipeline_template_id"])
         return "Standard pipeline"
 
+    def fake_get_pipeline_steps(**kwargs):
+        steps_calls.append(kwargs["pipeline_template_id"])
+        return [{"ID": "step-1", "Name": "Application review"}]
+
     monkeypatch.setattr("app.get_pipeline_template_name", fake_get_pipeline_template_name)
+    monkeypatch.setattr("app.get_pipeline_steps", fake_get_pipeline_steps)
 
     jobs = add_pipeline_template_names(
         [
@@ -141,17 +148,51 @@ def test_add_pipeline_template_names_deduplicates_lookups(monkeypatch):
         base_url="https://api.example.test/dev",
     )
 
-    assert calls == ["pipeline-123"]
+    assert name_calls == ["pipeline-123"]
+    assert steps_calls == ["pipeline-123"]
     assert jobs == [
         {
             "id": 1,
             "PipelineTemplateID": "pipeline-123",
             "PipelineTemplateName": "Standard pipeline",
+            "PipelineSteps": [{"ID": "step-1", "Name": "Application review"}],
         },
         {
             "id": 2,
             "PipelineTemplateID": "pipeline-123",
             "PipelineTemplateName": "Standard pipeline",
+            "PipelineSteps": [{"ID": "step-1", "Name": "Application review"}],
         },
-        {"id": 3, "PipelineTemplateName": None},
+        {"id": 3, "PipelineTemplateName": None, "PipelineSteps": []},
     ]
+
+
+def test_get_pipeline_steps_uses_steps_endpoint(monkeypatch):
+    captured = {}
+
+    def fake_get(url, *, headers, timeout):
+        captured.update(url=url, headers=headers, timeout=timeout)
+        return FakeResponse(
+            payload={
+                "data": {
+                    "JobStepTemplates": [
+                        {"ID": "step-1", "Name": "Application review"}
+                    ]
+                }
+            }
+        )
+
+    monkeypatch.setattr("app.requests.get", fake_get)
+
+    result = get_pipeline_steps(
+        api_key="secret",
+        base_url="https://api.example.test/dev",
+        pipeline_template_id="pipeline-123",
+    )
+
+    assert result == [{"ID": "step-1", "Name": "Application review"}]
+    assert captured["url"] == (
+        "https://api.example.test/dev/recruiting/job-step-templates/"
+        "pipelines/pipeline-123/steps"
+    )
+    assert captured["headers"]["x-company-api-key"] == "secret"
