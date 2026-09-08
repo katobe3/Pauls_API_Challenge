@@ -1,6 +1,12 @@
 import pytest
 
-from app import ApiError, fetch_all_jobs, search_jobs
+from app import (
+    ApiError,
+    add_pipeline_template_names,
+    fetch_all_jobs,
+    get_pipeline_template_name,
+    search_jobs,
+)
 
 
 class FakeResponse:
@@ -92,3 +98,60 @@ def test_fetch_all_jobs_returns_empty_list_without_results(monkeypatch):
     )
 
     assert result == []
+
+
+def test_get_pipeline_template_name_uses_template_endpoint(monkeypatch):
+    captured = {}
+
+    def fake_get(url, *, headers, timeout):
+        captured.update(url=url, headers=headers, timeout=timeout)
+        return FakeResponse(payload={"data": {"Name": "Hiring pipeline"}})
+
+    monkeypatch.setattr("app.requests.get", fake_get)
+
+    result = get_pipeline_template_name(
+        api_key="secret",
+        base_url="https://api.example.test/dev",
+        pipeline_template_id="pipeline-123",
+    )
+
+    assert result == "Hiring pipeline"
+    assert captured["url"] == (
+        "https://api.example.test/dev/recruiting/job-step-templates/pipelines/pipeline-123"
+    )
+    assert captured["headers"]["x-company-api-key"] == "secret"
+
+
+def test_add_pipeline_template_names_deduplicates_lookups(monkeypatch):
+    calls = []
+
+    def fake_get_pipeline_template_name(**kwargs):
+        calls.append(kwargs["pipeline_template_id"])
+        return "Standard pipeline"
+
+    monkeypatch.setattr("app.get_pipeline_template_name", fake_get_pipeline_template_name)
+
+    jobs = add_pipeline_template_names(
+        [
+            {"id": 1, "PipelineTemplateID": "pipeline-123"},
+            {"id": 2, "PipelineTemplateID": "pipeline-123"},
+            {"id": 3},
+        ],
+        api_key="secret",
+        base_url="https://api.example.test/dev",
+    )
+
+    assert calls == ["pipeline-123"]
+    assert jobs == [
+        {
+            "id": 1,
+            "PipelineTemplateID": "pipeline-123",
+            "PipelineTemplateName": "Standard pipeline",
+        },
+        {
+            "id": 2,
+            "PipelineTemplateID": "pipeline-123",
+            "PipelineTemplateName": "Standard pipeline",
+        },
+        {"id": 3, "PipelineTemplateName": None},
+    ]

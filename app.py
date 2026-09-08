@@ -6,6 +6,7 @@ import json
 import os
 import sys
 from typing import Any
+from urllib.parse import quote
 
 import requests
 from dotenv import load_dotenv
@@ -13,6 +14,7 @@ from dotenv import load_dotenv
 
 DEFAULT_BASE_URL = "https://api.paulsjob.ai/dev"
 ENDPOINT = "/recruiting/jobs/search-jobs"
+PIPELINE_TEMPLATE_ENDPOINT = "/recruiting/job-step-templates/pipelines"
 
 
 class ApiError(RuntimeError):
@@ -116,6 +118,78 @@ def fetch_all_jobs(
         page += 1
 
 
+def get_pipeline_template_name(
+    *,
+    api_key: str,
+    base_url: str,
+    pipeline_template_id: str,
+    timeout: float = 20.0,
+) -> str:
+    """Retrieve a pipeline template name by its ID."""
+
+    encoded_id = quote(pipeline_template_id, safe="")
+    response = requests.get(
+        f"{base_url}{PIPELINE_TEMPLATE_ENDPOINT}/{encoded_id}",
+        headers={
+            "Accept": "application/json",
+            "x-company-api-key": api_key,
+        },
+        timeout=timeout,
+    )
+
+    if not response.ok:
+        detail = response.text.strip()
+        raise ApiError(
+            f"Pipeline template request failed with HTTP {response.status_code}"
+            + (f": {detail[:500]}" if detail else ".")
+        )
+
+    try:
+        result = response.json()
+    except ValueError as exc:
+        raise ApiError("The pipeline template response was not JSON.") from exc
+
+    data = result.get("data") if isinstance(result, dict) else None
+    name = data.get("Name") if isinstance(data, dict) else None
+    if not isinstance(name, str) or not name:
+        raise ApiError("The pipeline template response did not contain a Name.")
+
+    return name
+
+
+def add_pipeline_template_names(
+    jobs: list[dict[str, Any]],
+    *,
+    api_key: str,
+    base_url: str,
+    timeout: float = 20.0,
+) -> list[dict[str, Any]]:
+    """Add the pipeline template name to every job that has a template ID."""
+
+    names_by_id: dict[str, str] = {}
+    enriched_jobs: list[dict[str, Any]] = []
+
+    for job in jobs:
+        enriched_job = dict(job)
+        pipeline_template_id = job.get("PipelineTemplateID")
+
+        if isinstance(pipeline_template_id, str) and pipeline_template_id:
+            if pipeline_template_id not in names_by_id:
+                names_by_id[pipeline_template_id] = get_pipeline_template_name(
+                    api_key=api_key,
+                    base_url=base_url,
+                    pipeline_template_id=pipeline_template_id,
+                    timeout=timeout,
+                )
+            enriched_job["PipelineTemplateName"] = names_by_id[pipeline_template_id]
+        else:
+            enriched_job["PipelineTemplateName"] = None
+
+        enriched_jobs.append(enriched_job)
+
+    return enriched_jobs
+
+
 def main() -> int:
     try:
         api_key, base_url = load_config()
@@ -123,6 +197,11 @@ def main() -> int:
             api_key=api_key,
             base_url=base_url,
             payload={},
+        )
+        jobs = add_pipeline_template_names(
+            jobs,
+            api_key=api_key,
+            base_url=base_url,
         )
     except ApiError as exc:
         print(f"Error: {exc}", file=sys.stderr)

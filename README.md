@@ -52,7 +52,7 @@ Example output:
 
 ## Status
 
-The repository includes a small Python API client. It calls the jobs search endpoint, follows all result pages, and prints the combined job list. The customer health-check analysis can build on this client as the next step.
+The repository includes a small Python API client. It calls the jobs search endpoint, follows all result pages, enriches each job with its pipeline template name, and prints the combined job list. The customer health-check analysis can build on this client as the next step.
 
 ```text
 .
@@ -96,7 +96,7 @@ The repository includes a small Python API client. It calls the jobs search endp
    python app.py
    ```
 
-   The combined job list is printed as formatted JSON. The client requests up to 100 jobs per page and follows `TotalPage` until every page has been collected.
+   The combined job list is printed as formatted JSON. The client requests up to 100 jobs per page, follows `TotalPage` until every page has been collected, and looks up each unique `PipelineTemplateID` using `GET /recruiting/job-step-templates/pipelines/{pipeline_template_id}`.
 
 7. Run the tests without making a network request:
 
