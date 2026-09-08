@@ -6,6 +6,7 @@ from app import (
     fetch_all_jobs,
     get_pipeline_template_name,
     get_pipeline_steps,
+    get_step_agents,
     search_jobs,
 )
 
@@ -135,8 +136,23 @@ def test_add_pipeline_template_names_deduplicates_lookups(monkeypatch):
         steps_calls.append(kwargs["pipeline_template_id"])
         return [{"ID": "step-1", "Name": "Application review"}]
 
+    def fake_add_agent_details_to_steps(steps, **kwargs):
+        return [
+            {
+                **steps[0],
+                "HasAgent": True,
+                "Agents": [
+                    {
+                        "Name": "Screening agent",
+                        "Instructions": {"SystemPrompt": "Screen candidates."},
+                    }
+                ],
+            }
+        ]
+
     monkeypatch.setattr("app.get_pipeline_template_name", fake_get_pipeline_template_name)
     monkeypatch.setattr("app.get_pipeline_steps", fake_get_pipeline_steps)
+    monkeypatch.setattr("app.add_agent_details_to_steps", fake_add_agent_details_to_steps)
 
     jobs = add_pipeline_template_names(
         [
@@ -155,13 +171,37 @@ def test_add_pipeline_template_names_deduplicates_lookups(monkeypatch):
             "id": 1,
             "PipelineTemplateID": "pipeline-123",
             "PipelineTemplateName": "Standard pipeline",
-            "PipelineSteps": [{"ID": "step-1", "Name": "Application review"}],
+            "PipelineSteps": [
+                {
+                    "ID": "step-1",
+                    "Name": "Application review",
+                    "HasAgent": True,
+                    "Agents": [
+                        {
+                            "Name": "Screening agent",
+                            "Instructions": {"SystemPrompt": "Screen candidates."},
+                        }
+                    ],
+                }
+            ],
         },
         {
             "id": 2,
             "PipelineTemplateID": "pipeline-123",
             "PipelineTemplateName": "Standard pipeline",
-            "PipelineSteps": [{"ID": "step-1", "Name": "Application review"}],
+            "PipelineSteps": [
+                {
+                    "ID": "step-1",
+                    "Name": "Application review",
+                    "HasAgent": True,
+                    "Agents": [
+                        {
+                            "Name": "Screening agent",
+                            "Instructions": {"SystemPrompt": "Screen candidates."},
+                        }
+                    ],
+                }
+            ],
         },
         {"id": 3, "PipelineTemplateName": None, "PipelineSteps": []},
     ]
@@ -196,3 +236,59 @@ def test_get_pipeline_steps_uses_steps_endpoint(monkeypatch):
         "pipelines/pipeline-123/steps"
     )
     assert captured["headers"]["x-company-api-key"] == "secret"
+
+
+def test_get_step_agents_returns_configured_agents(monkeypatch):
+    captured = {}
+
+    def fake_get(url, *, headers, timeout):
+        captured.update(url=url, headers=headers, timeout=timeout)
+        return FakeResponse(
+            payload={
+                "data": {
+                    "JobStepAgentTemplates": [
+                        {
+                            "Name": "Screening agent",
+                            "Instructions": {"SystemPrompt": "Screen candidates."},
+                        }
+                    ]
+                }
+            }
+        )
+
+    monkeypatch.setattr("app.requests.get", fake_get)
+
+    result = get_step_agents(
+        api_key="secret",
+        base_url="https://api.example.test/dev",
+        pipeline_template_id="pipeline-123",
+        step_template_id="step-1",
+    )
+
+    assert result[0]["Instructions"]["SystemPrompt"] == "Screen candidates."
+    assert captured["url"] == (
+        "https://api.example.test/dev/recruiting/job-step-templates/"
+        "pipelines/pipeline-123/steps/step-1/agents"
+    )
+
+
+def test_add_agent_details_to_steps_marks_steps_without_agents(monkeypatch):
+    monkeypatch.setattr("app.get_step_agents", lambda **kwargs: [])
+
+    from app import add_agent_details_to_steps
+
+    result = add_agent_details_to_steps(
+        [{"ID": "step-1", "Name": "Application review"}],
+        api_key="secret",
+        base_url="https://api.example.test/dev",
+        pipeline_template_id="pipeline-123",
+    )
+
+    assert result == [
+        {
+            "ID": "step-1",
+            "Name": "Application review",
+            "HasAgent": False,
+            "Agents": [],
+        }
+    ]

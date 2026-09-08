@@ -196,6 +196,97 @@ def get_pipeline_steps(
     return [step for step in steps if isinstance(step, dict)]
 
 
+def get_step_agents(
+    *,
+    api_key: str,
+    base_url: str,
+    pipeline_template_id: str,
+    step_template_id: str,
+    timeout: float = 20.0,
+) -> list[dict[str, Any]]:
+    """Retrieve the agent templates configured for one pipeline step."""
+
+    encoded_pipeline_id = quote(pipeline_template_id, safe="")
+    encoded_step_id = quote(step_template_id, safe="")
+    response = requests.get(
+        f"{base_url}{PIPELINE_TEMPLATE_ENDPOINT}/{encoded_pipeline_id}"
+        f"/steps/{encoded_step_id}/agents",
+        headers={
+            "Accept": "application/json",
+            "x-company-api-key": api_key,
+        },
+        timeout=timeout,
+    )
+
+    if not response.ok:
+        detail = response.text.strip()
+        raise ApiError(
+            f"Step agents request failed with HTTP {response.status_code}"
+            + (f": {detail[:500]}" if detail else ".")
+        )
+
+    try:
+        result = response.json()
+    except ValueError as exc:
+        raise ApiError("The step agents response was not JSON.") from exc
+
+    data = result.get("data") if isinstance(result, dict) else None
+    agents = data.get("JobStepAgentTemplates") if isinstance(data, dict) else None
+    if not isinstance(agents, list):
+        raise ApiError("The step agents response did not contain JobStepAgentTemplates.")
+
+    return [agent for agent in agents if isinstance(agent, dict)]
+
+
+def add_agent_details_to_steps(
+    steps: list[dict[str, Any]],
+    *,
+    api_key: str,
+    base_url: str,
+    pipeline_template_id: str,
+    timeout: float = 20.0,
+) -> list[dict[str, Any]]:
+    """Add agent presence and system prompts to each pipeline step."""
+
+    agents_by_step_id: dict[str, list[dict[str, Any]]] = {}
+    enriched_steps: list[dict[str, Any]] = []
+
+    for step in steps:
+        enriched_step = dict(step)
+        step_template_id = step.get("ID")
+
+        if isinstance(step_template_id, str) and step_template_id:
+            if step_template_id not in agents_by_step_id:
+                agents_by_step_id[step_template_id] = get_step_agents(
+                    api_key=api_key,
+                    base_url=base_url,
+                    pipeline_template_id=pipeline_template_id,
+                    step_template_id=step_template_id,
+                    timeout=timeout,
+                )
+            agents = agents_by_step_id[step_template_id]
+        else:
+            agents = []
+
+        enriched_step["HasAgent"] = bool(agents)
+        enriched_step["Agents"] = [
+            {
+                "Name": agent.get("Name"),
+                "Instructions": {
+                    "SystemPrompt": (
+                        agent.get("Instructions", {}).get("SystemPrompt")
+                        if isinstance(agent.get("Instructions"), dict)
+                        else None
+                    )
+                },
+            }
+            for agent in agents
+        ]
+        enriched_steps.append(enriched_step)
+
+    return enriched_steps
+
+
 def add_pipeline_template_names(
     jobs: list[dict[str, Any]],
     *,
@@ -221,7 +312,13 @@ def add_pipeline_template_names(
                         pipeline_template_id=pipeline_template_id,
                         timeout=timeout,
                     ),
-                    get_pipeline_steps(
+                    add_agent_details_to_steps(
+                        get_pipeline_steps(
+                            api_key=api_key,
+                            base_url=base_url,
+                            pipeline_template_id=pipeline_template_id,
+                            timeout=timeout,
+                        ),
                         api_key=api_key,
                         base_url=base_url,
                         pipeline_template_id=pipeline_template_id,
