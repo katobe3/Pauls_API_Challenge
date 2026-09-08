@@ -4,6 +4,7 @@ from app import (
     ApiError,
     add_application_details_to_steps,
     add_pipeline_template_names,
+    detect_step_bottlenecks,
     fetch_all_jobs,
     fetch_applications_for_step,
     get_pipeline_template_name,
@@ -402,3 +403,39 @@ def test_render_html_report_includes_jobs_steps_agents_and_applications(tmp_path
     assert "Check &lt;requirements&gt;." in report
     assert "Current applications</span><strong>1" in report
     assert report_path.read_text(encoding="utf-8") == report
+
+
+def test_detect_step_bottlenecks_flags_dominant_step():
+    jobs = [
+        {
+            "PaulsjobJobID": 99,
+            "JobPositionTitle": "Customer Success Manager",
+            "PipelineSteps": [
+                {"ID": "step-1", "Name": "Screening", "ApplicationCount": 12},
+                {"ID": "step-2", "Name": "Interview", "ApplicationCount": 2},
+                {"ID": "step-3", "Name": "Offer", "ApplicationCount": 1},
+            ],
+        }
+    ]
+
+    result = detect_step_bottlenecks(jobs)
+
+    assert len(result) == 1
+    assert result[0]["type"] == "step_bottleneck"
+    assert result[0]["step_id"] == "step-1"
+    assert result[0]["application_count"] == 12
+    assert result[0]["severity"] == "high"
+
+
+def test_detect_step_bottlenecks_ignores_small_balanced_steps():
+    jobs = [
+        {
+            "PaulsjobJobID": 99,
+            "PipelineSteps": [
+                {"ID": "step-1", "ApplicationCount": 4},
+                {"ID": "step-2", "ApplicationCount": 3},
+            ],
+        }
+    ]
+
+    assert detect_step_bottlenecks(jobs) == []

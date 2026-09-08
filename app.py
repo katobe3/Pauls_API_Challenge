@@ -19,6 +19,9 @@ ENDPOINT = "/recruiting/jobs/search-jobs"
 PIPELINE_TEMPLATE_ENDPOINT = "/recruiting/job-step-templates/pipelines"
 APPLICATION_ENDPOINT = "/recruiting/applications/search-applications"
 REPORT_PATH = Path("report.html")
+BOTTLENECK_MIN_APPLICATIONS = 1
+BOTTLENECK_MIN_SHARE = 0.50
+BOTTLENECK_MIN_RATIO = 2.0
 
 
 class ApiError(RuntimeError):
@@ -483,6 +486,66 @@ def add_pipeline_template_names(
     return enriched_jobs
 
 
+def detect_step_bottlenecks(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Find job steps with unusually high application volume."""
+
+    bottlenecks: list[dict[str, Any]] = []
+
+    for job in jobs:
+        steps = [
+            step
+            for step in job.get("PipelineSteps", [])
+            if isinstance(step, dict)
+        ]
+        if len(steps) < 2:
+            continue
+
+        counts = [
+            max(0, step.get("ApplicationCount", 0))
+            if isinstance(step.get("ApplicationCount", 0), int)
+            else 0
+            for step in steps
+        ]
+        total_applications = sum(counts)
+        if total_applications == 0:
+            continue
+
+        job_id = job.get("PaulsjobJobID", job.get("JobPositionID", "unknown"))
+        for step, count in zip(steps, counts):
+            if count < BOTTLENECK_MIN_APPLICATIONS:
+                continue
+
+            other_count = total_applications - count
+            comparison_average = other_count / (len(steps) - 1)
+            share = count / total_applications
+            ratio = count / max(comparison_average, 1)
+
+            if share < BOTTLENECK_MIN_SHARE and ratio < BOTTLENECK_MIN_RATIO:
+                continue
+
+            bottlenecks.append(
+                {
+                    "type": "step_bottleneck",
+                    "severity": "high" if share >= 0.75 or ratio >= 4 else "medium",
+                    "job_id": job_id,
+                    "job_title": job.get("JobPositionTitle"),
+                    "step_id": step.get("ID"),
+                    "step_name": step.get("Name", "Unnamed step"),
+                    "application_count": count,
+                    "total_applications": total_applications,
+                    "share": share,
+                    "comparison_average": comparison_average,
+                    "ratio": ratio,
+                    "recommendation": (
+                        "Review this step for manual-workload, automation, or "
+                        "next-step transition issues."
+                    ),
+                }
+            )
+
+    return bottlenecks
+
+
 def _text(value: Any, fallback: str = "—") -> str:
     """Return a safely escaped display value for the HTML report."""
 
@@ -578,9 +641,33 @@ def _render_steps(steps: list[dict[str, Any]]) -> str:
     )
 
 
+def _render_bottlenecks(bottlenecks: list[dict[str, Any]]) -> str:
+    if not bottlenecks:
+        return ""
+
+    alerts = []
+    for anomaly in bottlenecks:
+        severity = anomaly["severity"]
+        alerts.append(
+            '<div class="anomaly">'
+            f"<span class=\"status {'negative' if severity == 'high' else 'warning'}\">"
+            f"{_text(severity).upper()}</span>"
+            "<div>"
+            f"<strong>Step bottleneck · {_text(anomaly['step_name'])}</strong>"
+            f"<p>{anomaly['application_count']} applications · "
+            f"{anomaly['share']:.0%} of this job · "
+            f"{anomaly['ratio']:.1f}× the average of other steps</p>"
+            f"<small>{_text(anomaly['recommendation'])}</small>"
+            "</div></div>"
+        )
+
+    return '<div class="anomaly-list"><h3>Attention needed</h3>' + "".join(alerts) + "</div>"
+
+
 def render_html_report(jobs: list[dict[str, Any]]) -> str:
     """Render the current job, pipeline, agent, and application data as HTML."""
 
+    bottlenecks = detect_step_bottlenecks(jobs)
     pipeline_ids = {
         job.get("PipelineTemplateID")
         for job in jobs
@@ -607,6 +694,12 @@ def render_html_report(jobs: list[dict[str, Any]]) -> str:
         expired = bool(job.get("Expired"))
         job_state = "Expired" if expired else "Published" if published else "Draft"
         state_class = "negative" if expired else "positive" if published else "neutral"
+        job_id_value = job.get("PaulsjobJobID", job.get("JobPositionID", "unknown"))
+        job_bottlenecks = [
+            anomaly
+            for anomaly in bottlenecks
+            if str(anomaly["job_id"]) == str(job_id_value)
+        ]
         job_sections.append(
             '<section class="job-card">'
             '<div class="job-heading">'
@@ -622,6 +715,7 @@ def render_html_report(jobs: list[dict[str, Any]]) -> str:
             f"<div><dt>Pipeline ID</dt><dd>{_text(job.get('PipelineTemplateID'))}</dd></div>"
             "</dl>"
             f"{_render_steps(job.get('PipelineSteps', []))}"
+            f"{_render_bottlenecks(job_bottlenecks)}"
             "</section>"
         )
 
@@ -654,7 +748,7 @@ def render_html_report(jobs: list[dict[str, Any]]) -> str:
     h1 {{ font-size: clamp(32px, 5vw, 48px); line-height: 1.05; margin: 0; letter-spacing: -.04em; }}
     h2 {{ margin: 0; font-size: 21px; letter-spacing: -.02em; }}
     .generated {{ color: var(--muted); font-size: 13px; white-space: nowrap; }}
-    .metrics {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; margin-bottom: 28px; }}
+    .metrics {{ display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 16px; margin-bottom: 28px; }}
     .metric, .job-card, .empty-state {{ background: var(--card); border: 1px solid var(--line); border-radius: 16px; box-shadow: 0 10px 26px rgba(31, 41, 74, .05); }}
     .metric {{ padding: 20px; }}
     .metric span {{ display: block; color: var(--muted); font-size: 13px; }}
@@ -672,6 +766,7 @@ def render_html_report(jobs: list[dict[str, Any]]) -> str:
     td strong, td small {{ display: block; }} td small {{ color: var(--muted); margin-top: 2px; }} .step-number {{ display: inline-grid; place-items: center; width: 22px; height: 22px; margin-right: 8px; border-radius: 6px; background: var(--brand-soft); color: var(--brand); font-size: 12px; font-weight: 800; }}
     .agent + .agent {{ border-top: 1px solid var(--line); margin-top: 10px; padding-top: 10px; }} details {{ margin-top: 7px; }} summary {{ cursor: pointer; color: var(--brand); font-size: 13px; font-weight: 700; }} pre {{ margin: 8px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; background: #111827; color: #e5e7eb; padding: 12px; border-radius: 8px; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }}
     .application-count {{ display: inline-grid; place-items: center; min-width: 28px; height: 28px; padding: 0 8px; border-radius: 99px; background: var(--brand); color: white; font-weight: 800; }} .application-details ul {{ padding-left: 18px; margin: 8px 0 0; }} .application-details li {{ margin: 6px 0; }} .application-details li span {{ display: block; color: var(--muted); font-size: 12px; }} .muted {{ color: var(--muted); font-size: 13px; }} .empty-state {{ padding: 32px; text-align: center; color: var(--muted); }}
+    .anomaly-list {{ margin-top: 20px; border: 1px solid #f2d8a1; background: #fffaf0; border-radius: 12px; padding: 16px; }} .anomaly-list h3 {{ margin: 0 0 10px; font-size: 14px; color: var(--warn); }} .anomaly {{ display: flex; gap: 12px; padding: 12px 0; border-top: 1px solid #f2e4c7; }} .anomaly:first-of-type {{ border-top: 0; }} .anomaly strong, .anomaly p, .anomaly small {{ display: block; }} .anomaly p {{ margin: 2px 0; color: var(--muted); font-size: 13px; }} .anomaly small {{ color: var(--warn); }} .status.warning {{ background: var(--warn-soft); color: var(--warn); }}
     @media (max-width: 720px) {{ .shell {{ padding: 28px 14px 48px; }} .hero {{ display: block; }} .generated {{ margin-top: 12px; }} .metrics, .job-meta {{ grid-template-columns: repeat(2, 1fr); }} .job-card {{ padding: 18px; }} }}
   </style>
 </head>
@@ -686,6 +781,7 @@ def render_html_report(jobs: list[dict[str, Any]]) -> str:
       <article class="metric"><span>Pipelines</span><strong>{len(pipeline_ids)}</strong></article>
       <article class="metric"><span>Pipeline steps</span><strong>{len(steps)}</strong></article>
       <article class="metric"><span>Current applications</span><strong>{application_count}</strong></article>
+      <article class="metric"><span>Step bottlenecks</span><strong>{len(bottlenecks)}</strong></article>
     </section>
     {empty_message}
     {''.join(job_sections)}
