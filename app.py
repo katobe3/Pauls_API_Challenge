@@ -24,6 +24,9 @@ BOTTLENECK_MIN_SHARE = 0.50
 BOTTLENECK_MIN_RATIO = 2.0
 STUCK_WARNING_DAYS = 3
 STUCK_CRITICAL_DAYS = 10
+AGENT_REVIEW_WARNING_HOURS = 12
+AGENT_REVIEW_CRITICAL_HOURS = 24
+AGENT_REVIEW_GROUP_HIGH_COUNT = 2
 
 
 class ApiError(RuntimeError):
@@ -650,7 +653,7 @@ def _is_true(value: Any) -> bool:
     )
 
 
-def detect_stuck_candidates(
+def detect_stuck_applications(
     jobs: list[dict[str, Any]],
     *,
     now: datetime | None = None,
@@ -707,7 +710,7 @@ def detect_stuck_candidates(
                 )
                 anomalies.append(
                     {
-                        "type": "stuck_candidate",
+                        "type": "stuck_application",
                         "severity": severity,
                         "job_id": job_id,
                         "job_title": job.get("JobPositionTitle"),
@@ -733,6 +736,130 @@ def detect_stuck_candidates(
                 )
 
     return anomalies
+
+
+def detect_agent_reviews(
+    jobs: list[dict[str, Any]],
+    *,
+    now: datetime | None = None,
+    warning_hours: float = AGENT_REVIEW_WARNING_HOURS,
+    critical_hours: float = AGENT_REVIEW_CRITICAL_HOURS,
+    group_high_count: int = AGENT_REVIEW_GROUP_HIGH_COUNT,
+) -> list[dict[str, Any]]:
+    """Find applications waiting for an agent decision and group them by step."""
+
+    if warning_hours < 0 or critical_hours < warning_hours:
+        raise ValueError("critical_hours must be greater than or equal to warning_hours.")
+    if group_high_count < 2:
+        raise ValueError("group_high_count must be at least 2.")
+
+    current_time = now or datetime.now(timezone.utc)
+    if current_time.tzinfo is None:
+        current_time = current_time.replace(tzinfo=timezone.utc)
+    else:
+        current_time = current_time.astimezone(timezone.utc)
+
+    grouped: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for job in jobs:
+        job_id = job.get("PaulsjobJobID", job.get("JobPositionID", "unknown"))
+        pipeline_id = str(job.get("PipelineTemplateID", "unknown"))
+        for step in job.get("PipelineSteps", []):
+            if not isinstance(step, dict):
+                continue
+            agents = step.get("Agents", [])
+            has_agent = bool(agents) or _is_true(step.get("HasAgent"))
+            if not has_agent:
+                continue
+            agents = agents if isinstance(agents, list) else []
+
+            waiting_applications = []
+            for application in step.get("Applications", []):
+                if not isinstance(application, dict):
+                    continue
+                if not _is_true(_application_field(application, "AgentReview")):
+                    continue
+                if _application_field(application, "PaulDecision") is not None:
+                    continue
+                assigned_at_value = _application_field(application, "AssignedAt")
+                assigned_at = _parse_assigned_at(assigned_at_value)
+                if assigned_at is None:
+                    continue
+                waiting_hours = (current_time - assigned_at).total_seconds() / 3600
+                if waiting_hours < warning_hours:
+                    continue
+                person = application.get("Person")
+                waiting_applications.append(
+                    {
+                        "application_id": _application_field(
+                            application, "ID", application.get("id")
+                        ),
+                        "candidate_name": (
+                            person.get("FullName")
+                            if isinstance(person, dict)
+                            else None
+                        ),
+                        "assigned_at": assigned_at_value,
+                        "waiting_hours": waiting_hours,
+                    }
+                )
+
+            if not waiting_applications:
+                continue
+
+            step_id = str(step.get("ID", step.get("Name", "unknown")))
+            key = (str(job_id), pipeline_id, step_id)
+            agent_names = [
+                agent.get("Name")
+                for agent in agents
+                if isinstance(agent, dict) and agent.get("Name")
+            ]
+            has_system_prompt = any(
+                isinstance(agent, dict)
+                and isinstance(agent.get("Instructions"), dict)
+                and bool(agent["Instructions"].get("SystemPrompt"))
+                for agent in agents
+            )
+            existing = grouped.setdefault(
+                key,
+                {
+                    "type": "agent_review",
+                    "job_id": job_id,
+                    "job_title": job.get("JobPositionTitle"),
+                    "pipeline_id": job.get("PipelineTemplateID"),
+                    "pipeline_name": job.get("PipelineTemplateName"),
+                    "step_id": step.get("ID"),
+                    "step_name": step.get("Name", "Unnamed step"),
+                    "agent_names": agent_names,
+                    "has_system_prompt": has_system_prompt,
+                    "applications": [],
+                },
+            )
+            existing["applications"].extend(waiting_applications)
+
+    results = []
+    for group in grouped.values():
+        applications = group["applications"]
+        oldest_waiting_hours = max(item["waiting_hours"] for item in applications)
+        severity = (
+            "high"
+            if oldest_waiting_hours >= critical_hours
+            or len(applications) >= group_high_count
+            else "medium"
+        )
+        results.append(
+            {
+                **group,
+                "severity": severity,
+                "application_count": len(applications),
+                "oldest_waiting_hours": oldest_waiting_hours,
+                "recommendation": (
+                    "Review agent execution, system prompt completeness, candidate "
+                    "data availability, and API, credit, or rate-limit failures."
+                ),
+            }
+        )
+
+    return results
 
 
 def _text(value: Any, fallback: str = "—") -> str:
@@ -873,7 +1000,7 @@ def _render_bottlenecks(bottlenecks: list[dict[str, Any]]) -> str:
     return '<div class="anomaly-list"><h3>Attention needed</h3>' + "".join(alerts) + "</div>"
 
 
-def _render_stuck_candidates(anomalies: list[dict[str, Any]]) -> str:
+def _render_stuck_applications(anomalies: list[dict[str, Any]]) -> str:
     if not anomalies:
         return ""
 
@@ -902,7 +1029,7 @@ def _render_stuck_candidates(anomalies: list[dict[str, Any]]) -> str:
         )
 
     return (
-        '<div class="anomaly-list"><h3>Stuck candidates</h3>'
+        '<div class="anomaly-list"><h3>Stuck applications</h3>'
         '<p class="anomaly-note">AssignedAt is used as the entry time; complete '
         "step-transition history is not available in the current API response.</p>"
         + "".join(alerts)
@@ -910,11 +1037,37 @@ def _render_stuck_candidates(anomalies: list[dict[str, Any]]) -> str:
     )
 
 
+def _render_agent_reviews(anomalies: list[dict[str, Any]]) -> str:
+    if not anomalies:
+        return ""
+
+    alerts = []
+    for anomaly in anomalies:
+        severity = anomaly["severity"]
+        agent_names = ", ".join(anomaly.get("agent_names", [])) or "Unnamed agent"
+        prompt_status = "System prompt configured" if anomaly.get("has_system_prompt") else "System prompt missing"
+        alerts.append(
+            '<div class="anomaly">'
+            f"<span class=\"status {'negative' if severity == 'high' else 'warning'}\">"
+            f"{_text(severity).upper()}</span>"
+            "<div>"
+            f"<strong>Agent review · {_text(anomaly.get('step_name'))}</strong>"
+            f"<p>{anomaly['application_count']} application(s) waiting · "
+            f"Agent: {_text(agent_names)} · {_text(prompt_status)}</p>"
+            f"<p>Oldest waiting: {anomaly['oldest_waiting_hours']:.1f} hours</p>"
+            f"<small>{_text(anomaly.get('recommendation'))}</small>"
+            "</div></div>"
+        )
+
+    return '<div class="anomaly-list"><h3>Agent review</h3>' + "".join(alerts) + "</div>"
+
+
 def render_html_report(jobs: list[dict[str, Any]]) -> str:
     """Render the current job, pipeline, agent, and application data as HTML."""
 
     bottlenecks = detect_step_bottlenecks(jobs)
-    stuck_candidates = detect_stuck_candidates(jobs)
+    stuck_applications = detect_stuck_applications(jobs)
+    agent_reviews = detect_agent_reviews(jobs)
     pipeline_ids = {
         job.get("PipelineTemplateID")
         for job in jobs
@@ -947,9 +1100,14 @@ def render_html_report(jobs: list[dict[str, Any]]) -> str:
             for anomaly in bottlenecks
             if str(anomaly["job_id"]) == str(job_id_value)
         ]
-        job_stuck_candidates = [
+        job_stuck_applications = [
             anomaly
-            for anomaly in stuck_candidates
+            for anomaly in stuck_applications
+            if str(anomaly["job_id"]) == str(job_id_value)
+        ]
+        job_agent_reviews = [
+            anomaly
+            for anomaly in agent_reviews
             if str(anomaly["job_id"]) == str(job_id_value)
         ]
         job_sections.append(
@@ -968,7 +1126,8 @@ def render_html_report(jobs: list[dict[str, Any]]) -> str:
             "</dl>"
             f"{_render_steps(job.get('PipelineSteps', []))}"
             f"{_render_bottlenecks(job_bottlenecks)}"
-            f"{_render_stuck_candidates(job_stuck_candidates)}"
+            f"{_render_stuck_applications(job_stuck_applications)}"
+            f"{_render_agent_reviews(job_agent_reviews)}"
             "</section>"
         )
 
@@ -1001,7 +1160,7 @@ def render_html_report(jobs: list[dict[str, Any]]) -> str:
     h1 {{ font-size: clamp(32px, 5vw, 48px); line-height: 1.05; margin: 0; letter-spacing: -.04em; }}
     h2 {{ margin: 0; font-size: 21px; letter-spacing: -.02em; }}
     .generated {{ color: var(--muted); font-size: 13px; white-space: nowrap; }}
-    .metrics {{ display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 16px; margin-bottom: 28px; }}
+    .metrics {{ display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 16px; margin-bottom: 28px; }}
     .metric, .job-card, .empty-state {{ background: var(--card); border: 1px solid var(--line); border-radius: 16px; box-shadow: 0 10px 26px rgba(31, 41, 74, .05); }}
     .metric {{ padding: 20px; }}
     .metric span {{ display: block; color: var(--muted); font-size: 13px; }}
@@ -1035,7 +1194,8 @@ def render_html_report(jobs: list[dict[str, Any]]) -> str:
       <article class="metric"><span>Pipeline steps</span><strong>{len(steps)}</strong></article>
       <article class="metric"><span>Current applications</span><strong>{application_count}</strong></article>
       <article class="metric"><span>Step bottlenecks</span><strong>{len(bottlenecks)}</strong></article>
-      <article class="metric"><span>Stuck candidates</span><strong>{len(stuck_candidates)}</strong></article>
+      <article class="metric"><span>Stuck applications</span><strong>{len(stuck_applications)}</strong></article>
+      <article class="metric"><span>Agent review backlog</span><strong>{sum(item['application_count'] for item in agent_reviews)}</strong></article>
     </section>
     {empty_message}
     {''.join(job_sections)}

@@ -11,7 +11,7 @@ Customer health checks are often spread across several screens and require manua
 - Which jobs and pipelines are active?
 - Are expected steps and agents configured?
 - Where are applications accumulating?
-- Are candidates stuck in a step beyond the configured threshold?
+- Are applications stuck in a step beyond the configured threshold?
 - Which jobs need investigation first?
 - Which pipeline steps are acting as application bottlenecks?
 
@@ -23,7 +23,7 @@ The report will include:
 - Jobs and their assigned pipelines
 - Pipeline step configuration and agent status
 - Application counts by step
-- Stuck-candidate findings
+- Stuck-application findings
 - Missing or incomplete configuration warnings
 - A summary health status: `healthy`, `needs_attention`, or `critical`
 
@@ -41,7 +41,7 @@ Example output:
   },
   "anomalies": [
     {
-      "type": "stuck_candidates",
+      "type": "stuck_application",
       "job_id": "job_456",
       "step": "Phone screen",
       "count": 12,
@@ -97,7 +97,7 @@ The repository includes a small Python API client. It calls the jobs search endp
    python app.py
    ```
 
-   The app creates `report.html` in the repository root. It includes a summary dashboard and detailed job cards showing pipelines, steps, agents and their system prompts, expandable current-application lists, and anomaly alerts. Step bottlenecks require at least 2 applications and either at least 50% of the job’s applications or at least twice the average volume of the other steps. High severity starts at 75% of the job’s applications or 4× the average of other steps. Alerts also compare the same step name across distinct pipeline templates and include guiding questions for investigation. Stuck candidates use `AssignedAt` with a 3-day warning threshold and a 10-day critical threshold; human- or agent-review items beyond the warning threshold are high severity. Because the current application response does not provide complete transition history, the report treats an application returned under a step as still being in that step. The client requests up to 100 jobs per page, follows `TotalPage` until every page has been collected, and looks up each unique pipeline using `GET /recruiting/job-step-templates/pipelines/{pipeline_template_id}`, its steps using `GET /recruiting/job-step-templates/pipelines/{pipeline_template_id}/steps`, each step’s agents using `GET /recruiting/job-step-templates/pipelines/{pipeline_template_id}/steps/{step_template_id}/agents`, and applications using `POST /recruiting/applications/search-applications` filtered by job ID and current step name.
+   The app creates `report.html` in the repository root. It includes a summary dashboard and detailed job cards showing pipelines, steps, agents and their system prompts, expandable current-application lists, and anomaly alerts. Step bottlenecks require at least 2 applications and either at least 50% of the job’s applications or at least twice the average volume of the other steps. High severity starts at 75% of the job’s applications or 4× the average of other steps. Alerts also compare the same step name across distinct pipeline templates and include guiding questions for investigation. Stuck applications use `AssignedAt` with a 3-day warning threshold and a 10-day critical threshold; human- or agent-review items beyond the warning threshold are high severity. Because the current application response does not provide complete transition history, the report treats an application returned under a step as still being in that step. Agent-review alerts require `AgentReview == true`, a null `PaulDecision`, a configured step agent, and at least 12 hours in the step. They are high severity after 24 hours or when multiple applications are waiting on the same step or agent. The client requests up to 100 jobs per page, follows `TotalPage` until every page has been collected, and looks up each unique pipeline using `GET /recruiting/job-step-templates/pipelines/{pipeline_template_id}`, its steps using `GET /recruiting/job-step-templates/pipelines/{pipeline_template_id}/steps`, each step’s agents using `GET /recruiting/job-step-templates/pipelines/{pipeline_template_id}/steps/{step_template_id}/agents`, and applications using `POST /recruiting/applications/search-applications` filtered by job ID and current step name.
 
 7. Run the tests without making a network request:
 
@@ -127,10 +127,10 @@ The current client calls `POST /recruiting/jobs/search-jobs`. Authentication use
 The report should make its rules explicit and deterministic. The initial rules are:
 
 - `critical`: a job has no pipeline, or a required pipeline step/agent is missing.
-- `needs_attention`: candidates have remained in the same step longer than the configured threshold, or an API response is incomplete.
+- `needs_attention`: applications have remained in the same step longer than the configured threshold, or an API response is incomplete.
 - `healthy`: no critical configuration issue or configured aging anomaly was found.
 
-The stuck-candidate threshold should be configurable rather than hard-coded. A reasonable default is 7 days, with the report showing the threshold used for every finding.
+The stuck-application threshold should be configurable rather than hard-coded. The current defaults are 3 days for warning and 10 days for critical, with the report showing the evidence used for every finding.
 
 ## Error handling
 
@@ -149,7 +149,7 @@ Partial results should be clearly marked as partial; they should not be presente
 ## Assumptions and limitations
 
 - A customer is the reporting boundary; jobs and applications are evaluated only within that account.
-- A candidate is considered stuck based on time since the latest step transition, not time since application creation.
+- An application is considered stuck based on time since the latest step transition, not time since application creation.
 - The initial version reports anomalies and does not modify jobs, pipelines, candidates, or agent configuration.
 - Health thresholds may need to vary by customer, job type, or pipeline and should become configuration in a production version.
 - The report depends on the API exposing enough timestamps and relationships to connect applications to pipeline steps.
@@ -171,7 +171,7 @@ The client and health rules should be tested independently using mocked API resp
 - Multiple pages of jobs and applications
 - Empty customers and jobs without pipelines
 - Missing agents or steps
-- Candidates over and under the stuck threshold
+- Applications over and under the stuck threshold
 - Rate limits, timeouts, malformed responses, and server errors
 - Redaction of API keys from errors and logs
 

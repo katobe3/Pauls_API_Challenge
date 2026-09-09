@@ -7,7 +7,8 @@ from app import (
     add_application_details_to_steps,
     add_pipeline_template_names,
     detect_step_bottlenecks,
-    detect_stuck_candidates,
+    detect_stuck_applications,
+    detect_agent_reviews,
     fetch_all_jobs,
     fetch_applications_for_step,
     get_pipeline_template_name,
@@ -501,7 +502,7 @@ def test_render_html_report_shows_bottleneck_context_and_guidance():
     assert "Speed up manual review through automation." in report
 
 
-def test_detect_stuck_candidates_uses_warning_critical_and_review_severity():
+def test_detect_stuck_applications_uses_warning_critical_and_review_severity():
     jobs = [
         {
             "PaulsjobJobID": 99,
@@ -553,7 +554,7 @@ def test_detect_stuck_candidates_uses_warning_critical_and_review_severity():
         }
     ]
 
-    result = detect_stuck_candidates(
+    result = detect_stuck_applications(
         jobs, now=datetime(2026, 9, 9, 12, tzinfo=timezone.utc)
     )
 
@@ -569,7 +570,7 @@ def test_detect_stuck_candidates_uses_warning_critical_and_review_severity():
     assert result[0]["step_name"] == "Application review"
 
 
-def test_render_html_report_shows_stuck_candidate_metric_and_evidence():
+def test_render_html_report_shows_stuck_application_metric_and_evidence():
     jobs = [
         {
             "PaulsjobJobID": 99,
@@ -592,6 +593,102 @@ def test_render_html_report_shows_stuck_candidate_metric_and_evidence():
 
     report = render_html_report(jobs)
 
-    assert "Stuck candidates</span><strong>1" in report
+    assert "Stuck applications</span><strong>1" in report
     assert "Ada Lovelace" in report
     assert "complete step-transition history is not available" in report
+
+
+def test_detect_agent_reviews_groups_waiting_applications_and_escalates():
+    jobs = [
+        {
+            "PaulsjobJobID": 99,
+            "PipelineTemplateID": "pipeline-1",
+            "PipelineTemplateName": "Screening pipeline",
+            "PipelineSteps": [
+                {
+                    "ID": "step-1",
+                    "Name": "AI screening",
+                    "Agents": [
+                        {
+                            "Name": "Screening agent",
+                            "Instructions": {"SystemPrompt": "Assess the CV."},
+                        }
+                    ],
+                    "Applications": [
+                        {
+                            "ID": "app-1",
+                            "Person": {"FullName": "Ada Lovelace"},
+                            "Application": {
+                                "AgentReview": True,
+                                "PaulDecision": None,
+                                "AssignedAt": "2026-09-08T00:00:00Z",
+                            },
+                        },
+                        {
+                            "ID": "app-2",
+                            "Person": {"FullName": "Grace Hopper"},
+                            "Application": {
+                                "AgentReview": True,
+                                "PaulDecision": None,
+                                "AssignedAt": "2026-09-08T00:00:00Z",
+                            },
+                        },
+                        {
+                            "ID": "app-complete",
+                            "Application": {
+                                "AgentReview": True,
+                                "PaulDecision": "positive",
+                                "AssignedAt": "2026-09-01T00:00:00Z",
+                            },
+                        },
+                    ],
+                }
+            ],
+        }
+    ]
+
+    result = detect_agent_reviews(
+        jobs, now=datetime(2026, 9, 9, 0, tzinfo=timezone.utc)
+    )
+
+    assert len(result) == 1
+    assert result[0]["application_count"] == 2
+    assert result[0]["severity"] == "high"
+    assert result[0]["agent_names"] == ["Screening agent"]
+    assert result[0]["has_system_prompt"] is True
+    assert result[0]["oldest_waiting_hours"] == 24
+
+
+def test_render_html_report_shows_agent_review_backlog():
+    jobs = [
+        {
+            "PaulsjobJobID": 99,
+            "PipelineSteps": [
+                {
+                    "Name": "AI screening",
+                    "Agents": [
+                        {
+                            "Name": "Screening agent",
+                            "Instructions": {"SystemPrompt": "Assess the CV."},
+                        }
+                    ],
+                    "Applications": [
+                        {
+                            "Person": {"FullName": "Ada Lovelace"},
+                            "Application": {
+                                "AgentReview": True,
+                                "PaulDecision": None,
+                                "AssignedAt": "2026-09-01T00:00:00Z",
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+    ]
+
+    report = render_html_report(jobs)
+
+    assert "Agent review backlog</span><strong>1" in report
+    assert "Agent review · AI screening" in report
+    assert "System prompt configured" in report
