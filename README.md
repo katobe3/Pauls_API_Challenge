@@ -57,6 +57,8 @@ Example output:
 
 The repository includes a small Python API client. It calls the jobs search endpoint, follows all result pages, enriches each job with its pipeline template name, step templates, agent presence, agent system prompts, and current applications per step. It then generates a static HTML report.
 
+The dashboard is branded “API Challenge · Technical Project Manager PJRI · KTB” and titled “CUSTOMER HEALTH CHECK”. Its summary is grouped into a Recruiting pipeline overview (Jobs, Pipelines, Applications) and Anomalies (Step bottlenecks, Stuck applications, Agent review backlog, and Suspicious applications). The four anomaly metrics count affected application records rather than only affected jobs: bottlenecks count applications in flagged steps, stuck applications count affected application records, agent review counts waiting applications, and suspicious applications count distinct duplicate application IDs. Medium anomalies use amber styling and high-severity anomalies use red styling. Each alert includes its severity, triggering evidence, and a suggested action or guiding question.
+
 ```text
 .
 ├── README.md

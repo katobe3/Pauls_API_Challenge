@@ -406,7 +406,10 @@ def test_render_html_report_includes_jobs_steps_agents_and_applications(tmp_path
     assert "Screening agent" in report
     assert "Ada Lovelace" in report
     assert "Check &lt;requirements&gt;." in report
-    assert "Current applications</span><strong>1" in report
+    assert "Applications</span><strong>1" in report
+    assert "<th>Pipeline step</th><th>Applications</th>" in report
+    assert "Location" not in report
+    assert "Pipeline ID" not in report
     assert report_path.read_text(encoding="utf-8") == report
 
 
@@ -498,8 +501,9 @@ def test_render_html_report_shows_bottleneck_context_and_guidance():
 
     report = render_html_report(jobs)
 
-    assert "Step bottlenecks</span><strong>2" in report
-    assert "Compared with 1 other pipeline(s)" in report
+    assert "Step bottlenecks</span><strong>8" in report
+    assert '<article class="metric negative"><span>Step bottlenecks' in report
+    assert "Compared with 1 other pipelines: 2.0 average applications" in report
     assert "Speed up manual review through automation." in report
 
 
@@ -792,5 +796,6 @@ def test_render_html_report_shows_suspicious_application_metric():
     report = render_html_report(jobs)
 
     assert "Suspicious applications</span><strong>2" in report
+    assert '<article class="metric warning"><span>Suspicious applications' in report
     assert "Suspicious applications · Ada Lovelace" in report
     assert "Did the candidate intentionally apply more than once?" in report

@@ -990,6 +990,14 @@ def _text(value: Any, fallback: str = "—") -> str:
     return escape(str(value))
 
 
+def _date_only(value: Any) -> str:
+    """Display an API timestamp as a calendar date without its time."""
+
+    if not isinstance(value, str) or not value:
+        return "—"
+    return _text(value[:10])
+
+
 def _application_display_name(application: dict[str, Any]) -> str:
     person = application.get("Person")
     if isinstance(person, dict):
@@ -1052,18 +1060,27 @@ def _render_steps(steps: list[dict[str, Any]]) -> str:
         hidden = bool(step.get("IsHidden"))
         applications = step.get("Applications", [])
         applications = applications if isinstance(applications, list) else []
+        application_count = len(applications)
+        count_class = "empty" if application_count == 0 else ""
+        step_details = (
+            '<details class="step-details">'
+            "<summary>Step details</summary>"
+            f"<p><strong>Status</strong> "
+            f"<span class=\"status {'neutral' if hidden else 'positive'}\">"
+            f"{'Hidden' if hidden else 'Active'}</span></p>"
+            f"<p><strong>Agent configuration</strong> "
+            f"{_render_agents(step.get('Agents', []))}</p>"
+            "</details>"
+        )
         rows.append(
             "<tr>"
             "<td>"
             f"<span class=\"step-number\">{_text(step.get('OrderIndex'), '?')}</span>"
             f"<strong>{_text(step.get('Name'), 'Unnamed step')}</strong>"
-            f"<small>{_text(step.get('Category'), 'No category')}</small>"
+            f"{step_details}"
             "</td>"
-            f"<td><span class=\"status {'neutral' if hidden else 'positive'}\">"
-            f"{'Hidden' if hidden else 'Active'}</span></td>"
-            f"<td>{_render_agents(step.get('Agents', []))}</td>"
             "<td>"
-            f"<span class=\"application-count\">{len(applications)}</span>"
+            f"<span class=\"application-count {count_class}\">{application_count}</span>"
             f"{_render_applications(applications)}"
             "</td>"
             "</tr>"
@@ -1071,8 +1088,7 @@ def _render_steps(steps: list[dict[str, Any]]) -> str:
 
     return (
         '<div class="table-wrap"><table>'
-        "<thead><tr><th>Pipeline step</th><th>Status</th>"
-        "<th>Agent configuration</th><th>Applications</th></tr></thead>"
+        "<thead><tr><th>Pipeline step</th><th>Applications</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody></table></div>"
     )
 
@@ -1090,12 +1106,9 @@ def _render_bottlenecks(bottlenecks: list[dict[str, Any]]) -> str:
             peer_comparison = "No comparable step found in another pipeline."
         else:
             peer_comparison = (
-                f"Compared with {peer_pipeline_count} other pipeline(s): "
-                f"{peer_average:.1f} average applications for this step name"
+                f"Compared with {peer_pipeline_count} other pipelines: "
+                f"{peer_average:.1f} average applications"
             )
-            peer_ratio = anomaly.get("peer_ratio")
-            if peer_ratio is not None:
-                peer_comparison += f" ({peer_ratio:.1f}× this volume)"
             peer_comparison += "."
         questions = "".join(
             "<li>"
@@ -1109,10 +1122,8 @@ def _render_bottlenecks(bottlenecks: list[dict[str, Any]]) -> str:
             f"{_text(severity).upper()}</span>"
             "<div>"
             f"<strong>Step bottleneck · {_text(anomaly['step_name'])}</strong>"
-            f"<p>{anomaly['application_count']} applications · "
-            f"{anomaly['share']:.0%} of this job · "
-            f"{anomaly['ratio']:.1f}× the average of other steps</p>"
-            f"<p>{_text(peer_comparison)}</p>"
+            f"<p>{anomaly['application_count']} applications</p>"
+            f"<small>{_text(peer_comparison)}</small>"
             f"<details><summary>Guiding questions</summary><ul>{questions}</ul></details>"
             "</div></div>"
         )
@@ -1246,6 +1257,23 @@ def render_html_report(jobs: list[dict[str, Any]]) -> str:
         for step in steps
         if isinstance(step.get("ApplicationCount"), int)
     )
+    bottleneck_application_count = sum(
+        anomaly["application_count"] for anomaly in bottlenecks
+    )
+    stuck_application_count = len(stuck_applications)
+    agent_review_application_count = sum(
+        anomaly["application_count"] for anomaly in agent_reviews
+    )
+    suspicious_application_count = sum(
+        anomaly["application_count"] for anomaly in suspicious_applications
+    )
+
+    def anomaly_metric_class(anomalies: list[dict[str, Any]]) -> str:
+        if any(anomaly.get("severity") == "high" for anomaly in anomalies):
+            return "metric negative"
+        if anomalies:
+            return "metric warning"
+        return "metric"
 
     job_sections = []
     for job in jobs:
@@ -1287,9 +1315,7 @@ def render_html_report(jobs: list[dict[str, Any]]) -> str:
             f"<span class=\"status {state_class}\">{job_state}</span>"
             "</div>"
             '<dl class="job-meta">'
-            f"<div><dt>Location</dt><dd>{_text(job.get('Location'))}</dd></div>"
-            f"<div><dt>Created</dt><dd>{_text(job.get('CreatedAt'))}</dd></div>"
-            f"<div><dt>Pipeline ID</dt><dd>{_text(job.get('PipelineTemplateID'))}</dd></div>"
+            f"<div><dt>Created</dt><dd>{_date_only(job.get('CreatedAt'))}</dd></div>"
             "</dl>"
             f"{_render_steps(job.get('PipelineSteps', []))}"
             f"{_render_bottlenecks(job_bottlenecks)}"
@@ -1325,12 +1351,13 @@ def render_html_report(jobs: list[dict[str, Any]]) -> str:
     .shell {{ max-width: 1280px; margin: 0 auto; padding: 48px 24px 72px; }}
     .hero {{ display: flex; justify-content: space-between; gap: 32px; align-items: end; margin-bottom: 28px; }}
     .eyebrow {{ margin: 0 0 8px; color: var(--brand); font-weight: 800; font-size: 12px; letter-spacing: .12em; }}
-    h1 {{ font-size: clamp(32px, 5vw, 48px); line-height: 1.05; margin: 0; letter-spacing: -.04em; }}
+    h1 {{ color: var(--ink); font-size: clamp(32px, 5vw, 48px); line-height: 1.05; margin: 0; letter-spacing: -.04em; }}
     h2 {{ margin: 0; font-size: 21px; letter-spacing: -.02em; }}
     .generated {{ color: var(--muted); font-size: 13px; white-space: nowrap; }}
+    .dashboard-group {{ margin-bottom: 28px; }} .dashboard-group > h2 {{ margin: 0 0 12px; font-size: 18px; }}
     .metrics {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 16px; margin-bottom: 28px; }}
     .metric, .job-card, .empty-state {{ background: var(--card); border: 1px solid var(--line); border-radius: 16px; box-shadow: 0 10px 26px rgba(31, 41, 74, .05); }}
-    .metric {{ padding: 20px; }}
+    .metric {{ padding: 20px; }} .metric.warning {{ background: var(--warn-soft); border-color: #f2d8a1; }} .metric.warning span, .metric.warning strong {{ color: var(--warn); }} .metric.negative {{ background: var(--bad-soft); border-color: #f0bdc8; }} .metric.negative span, .metric.negative strong {{ color: var(--bad); }}
     .metric span {{ display: block; color: var(--muted); font-size: 13px; }}
     .metric strong {{ display: block; font-size: 30px; margin-top: 4px; letter-spacing: -.04em; }}
     .job-card {{ padding: 28px; margin-top: 20px; }}
@@ -1342,10 +1369,10 @@ def render_html_report(jobs: list[dict[str, Any]]) -> str:
     .status {{ display: inline-block; padding: 4px 9px; border-radius: 99px; font-size: 12px; font-weight: 800; white-space: nowrap; }}
     .status.positive {{ background: var(--good-soft); color: var(--good); }} .status.neutral {{ background: var(--brand-soft); color: #5044bc; }} .status.negative {{ background: var(--bad-soft); color: var(--bad); }}
     .table-wrap {{ overflow-x: auto; border: 1px solid var(--line); border-radius: 12px; }}
-    table {{ border-collapse: collapse; width: 100%; min-width: 760px; }} th, td {{ text-align: left; vertical-align: top; padding: 16px; border-bottom: 1px solid var(--line); }} tr:last-child td {{ border-bottom: 0; }} th {{ color: var(--muted); font-size: 12px; background: #fafbfe; }}
+    table {{ border-collapse: collapse; width: 100%; min-width: 500px; }} th, td {{ text-align: left; vertical-align: top; padding: 16px; border-bottom: 1px solid var(--line); }} tr:last-child td {{ border-bottom: 0; }} th {{ color: var(--muted); font-size: 12px; background: #fafbfe; }}
     td strong, td small {{ display: block; }} td small {{ color: var(--muted); margin-top: 2px; }} .step-number {{ display: inline-grid; place-items: center; width: 22px; height: 22px; margin-right: 8px; border-radius: 6px; background: var(--brand-soft); color: var(--brand); font-size: 12px; font-weight: 800; }}
     .agent + .agent {{ border-top: 1px solid var(--line); margin-top: 10px; padding-top: 10px; }} details {{ margin-top: 7px; }} summary {{ cursor: pointer; color: var(--brand); font-size: 13px; font-weight: 700; }} pre {{ margin: 8px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; background: #111827; color: #e5e7eb; padding: 12px; border-radius: 8px; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }}
-    .application-count {{ display: inline-grid; place-items: center; min-width: 28px; height: 28px; padding: 0 8px; border-radius: 99px; background: var(--brand); color: white; font-weight: 800; }} .application-details ul {{ padding-left: 18px; margin: 8px 0 0; }} .application-details li {{ margin: 6px 0; }} .application-details li span {{ display: block; color: var(--muted); font-size: 12px; }} .muted {{ color: var(--muted); font-size: 13px; }} .empty-state {{ padding: 32px; text-align: center; color: var(--muted); }}
+    .application-count {{ display: inline-grid; place-items: center; min-width: 28px; height: 28px; padding: 0 8px; border-radius: 99px; background: var(--brand); color: white; font-weight: 800; }} .application-count.empty {{ background: transparent; color: var(--muted); padding-left: 0; }} .application-details ul {{ padding-left: 18px; margin: 8px 0 0; }} .application-details li {{ margin: 6px 0; }} .application-details li span {{ display: block; color: var(--muted); font-size: 12px; }} .step-details {{ margin-top: 10px; }} .step-details p {{ margin: 8px 0; color: var(--muted); font-size: 13px; }} .step-details p strong {{ color: var(--ink); margin-right: 5px; }} .muted {{ color: var(--muted); font-size: 13px; }} .empty-state {{ padding: 32px; text-align: center; color: var(--muted); }}
     .anomaly-list {{ margin-top: 20px; border: 1px solid #f2d8a1; background: #fffaf0; border-radius: 12px; padding: 16px; }} .anomaly-list h3 {{ margin: 0 0 10px; font-size: 14px; color: var(--warn); }} .anomaly-note {{ color: var(--muted); font-size: 12px; margin: -4px 0 8px; }} .anomaly {{ display: flex; gap: 12px; padding: 12px 0; border-top: 1px solid #f2e4c7; }} .anomaly:first-of-type {{ border-top: 0; }} .anomaly strong, .anomaly p, .anomaly small {{ display: block; }} .anomaly p {{ margin: 2px 0; color: var(--muted); font-size: 13px; }} .anomaly small {{ color: var(--warn); }} .status.warning {{ background: var(--warn-soft); color: var(--warn); }}
     @media (max-width: 720px) {{ .shell {{ padding: 28px 14px 48px; }} .hero {{ display: block; }} .generated {{ margin-top: 12px; }} .metrics, .job-meta {{ grid-template-columns: repeat(2, 1fr); }} .job-card {{ padding: 18px; }} }}
   </style>
@@ -1353,18 +1380,25 @@ def render_html_report(jobs: list[dict[str, Any]]) -> str:
 <body>
   <main class="shell">
     <header class="hero">
-      <div><p class="eyebrow">PJRI · CUSTOMER HEALTH CHECK</p><h1>Recruiting pipeline overview</h1></div>
+      <div><p class="eyebrow">API Challenge · Technical Project Manager PJRI · KTB</p><h1>CUSTOMER HEALTH CHECK</h1></div>
       <p class="generated">Generated {generated_at}</p>
     </header>
-    <section class="metrics" aria-label="Report summary">
-      <article class="metric"><span>Jobs</span><strong>{len(jobs)}</strong></article>
-      <article class="metric"><span>Pipelines</span><strong>{len(pipeline_ids)}</strong></article>
-      <article class="metric"><span>Pipeline steps</span><strong>{len(steps)}</strong></article>
-      <article class="metric"><span>Current applications</span><strong>{application_count}</strong></article>
-      <article class="metric"><span>Step bottlenecks</span><strong>{len(bottlenecks)}</strong></article>
-      <article class="metric"><span>Stuck applications</span><strong>{len(stuck_applications)}</strong></article>
-      <article class="metric"><span>Agent review backlog</span><strong>{sum(item['application_count'] for item in agent_reviews)}</strong></article>
-      <article class="metric"><span>Suspicious applications</span><strong>{sum(item['application_count'] for item in suspicious_applications)}</strong></article>
+    <section class="dashboard-group" aria-labelledby="pipeline-summary">
+      <h2 id="pipeline-summary">Recruiting pipeline overview</h2>
+      <div class="metrics">
+        <article class="metric"><span>Jobs</span><strong>{len(jobs)}</strong></article>
+        <article class="metric"><span>Pipelines</span><strong>{len(pipeline_ids)}</strong></article>
+        <article class="metric"><span>Applications</span><strong>{application_count}</strong></article>
+      </div>
+    </section>
+    <section class="dashboard-group" aria-labelledby="anomaly-summary">
+      <h2 id="anomaly-summary">Anomalies</h2>
+      <div class="metrics">
+        <article class="{anomaly_metric_class(bottlenecks)}"><span>Step bottlenecks</span><strong>{bottleneck_application_count}</strong></article>
+        <article class="{anomaly_metric_class(stuck_applications)}"><span>Stuck applications</span><strong>{stuck_application_count}</strong></article>
+        <article class="{anomaly_metric_class(agent_reviews)}"><span>Agent review backlog</span><strong>{agent_review_application_count}</strong></article>
+        <article class="{anomaly_metric_class(suspicious_applications)}"><span>Suspicious applications</span><strong>{suspicious_application_count}</strong></article>
+      </div>
     </section>
     {empty_message}
     {''.join(job_sections)}
