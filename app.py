@@ -22,6 +22,8 @@ REPORT_PATH = Path("report.html")
 BOTTLENECK_MIN_APPLICATIONS = 2
 BOTTLENECK_MIN_SHARE = 0.50
 BOTTLENECK_MIN_RATIO = 2.0
+STUCK_WARNING_DAYS = 3
+STUCK_CRITICAL_DAYS = 10
 
 
 class ApiError(RuntimeError):
@@ -608,6 +610,131 @@ def detect_step_bottlenecks(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return bottlenecks
 
 
+def _application_data(application: dict[str, Any]) -> dict[str, Any]:
+    """Return the API's nested Application object when it is present."""
+
+    nested = application.get("Application")
+    return nested if isinstance(nested, dict) else application
+
+
+def _application_field(
+    application: dict[str, Any],
+    field: str,
+    default: Any = None,
+) -> Any:
+    """Read an application field from nested or flat API response shapes."""
+
+    data = _application_data(application)
+    return data.get(field, application.get(field, default))
+
+
+def _parse_assigned_at(value: Any) -> datetime | None:
+    """Parse an API timestamp into an aware UTC datetime."""
+
+    if not isinstance(value, str) or not value.strip():
+        return None
+
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _is_true(value: Any) -> bool:
+    return value is True or (
+        isinstance(value, str) and value.strip().casefold() in {"true", "1", "yes"}
+    )
+
+
+def detect_stuck_candidates(
+    jobs: list[dict[str, Any]],
+    *,
+    now: datetime | None = None,
+    warning_days: float = STUCK_WARNING_DAYS,
+    critical_days: float = STUCK_CRITICAL_DAYS,
+) -> list[dict[str, Any]]:
+    """Find applications that have stayed in their current step too long.
+
+    The API response tells us when an application was assigned to its current
+    step, but does not provide complete transition history. Therefore each
+    application returned under a step is treated as still being in that step.
+    """
+
+    if warning_days < 0 or critical_days < warning_days:
+        raise ValueError("critical_days must be greater than or equal to warning_days.")
+
+    current_time = now or datetime.now(timezone.utc)
+    if current_time.tzinfo is None:
+        current_time = current_time.replace(tzinfo=timezone.utc)
+    else:
+        current_time = current_time.astimezone(timezone.utc)
+
+    anomalies: list[dict[str, Any]] = []
+    for job in jobs:
+        job_id = job.get("PaulsjobJobID", job.get("JobPositionID", "unknown"))
+        for step in job.get("PipelineSteps", []):
+            if not isinstance(step, dict):
+                continue
+
+            applications = step.get("Applications", [])
+            if not isinstance(applications, list):
+                continue
+
+            for application in applications:
+                if not isinstance(application, dict):
+                    continue
+                assigned_at_value = _application_field(application, "AssignedAt")
+                assigned_at = _parse_assigned_at(assigned_at_value)
+                if assigned_at is None:
+                    continue
+
+                days_in_step = (current_time - assigned_at).total_seconds() / 86400
+                if days_in_step < warning_days:
+                    continue
+
+                human_review = _is_true(_application_field(application, "HumanReview"))
+                agent_review = _is_true(_application_field(application, "AgentReview"))
+                severity = (
+                    "high"
+                    if days_in_step >= critical_days
+                    or human_review
+                    or agent_review
+                    else "medium"
+                )
+                anomalies.append(
+                    {
+                        "type": "stuck_candidate",
+                        "severity": severity,
+                        "job_id": job_id,
+                        "job_title": job.get("JobPositionTitle"),
+                        "step_id": step.get("ID"),
+                        "step_name": step.get("Name", "Unnamed step"),
+                        "application_id": _application_field(
+                            application, "ID", application.get("id")
+                        ),
+                        "candidate_name": (
+                            application.get("Person", {}).get("FullName")
+                            if isinstance(application.get("Person"), dict)
+                            else None
+                        ),
+                        "assigned_at": assigned_at_value,
+                        "days_in_step": days_in_step,
+                        "human_review": human_review,
+                        "agent_review": agent_review,
+                        "recommendation": (
+                            "Review or reassign this candidate, confirm the next-step "
+                            "rule, and decide whether to move, reject, or escalate."
+                        ),
+                    }
+                )
+
+    return anomalies
+
+
 def _text(value: Any, fallback: str = "—") -> str:
     """Return a safely escaped display value for the HTML report."""
 
@@ -746,10 +873,48 @@ def _render_bottlenecks(bottlenecks: list[dict[str, Any]]) -> str:
     return '<div class="anomaly-list"><h3>Attention needed</h3>' + "".join(alerts) + "</div>"
 
 
+def _render_stuck_candidates(anomalies: list[dict[str, Any]]) -> str:
+    if not anomalies:
+        return ""
+
+    alerts = []
+    for anomaly in anomalies:
+        severity = anomaly["severity"]
+        review_flags = []
+        if anomaly.get("human_review"):
+            review_flags.append("human review")
+        if anomaly.get("agent_review"):
+            review_flags.append("agent review")
+        review_context = (
+            f" · {', '.join(review_flags)} active" if review_flags else ""
+        )
+        alerts.append(
+            '<div class="anomaly">'
+            f"<span class=\"status {'negative' if severity == 'high' else 'warning'}\">"
+            f"{_text(severity).upper()}</span>"
+            "<div>"
+            f"<strong>{_text(anomaly.get('candidate_name'), 'Unnamed candidate')}</strong>"
+            f"<p>{_text(anomaly.get('step_name'), 'Unnamed step')} · "
+            f"{anomaly['days_in_step']:.1f} days in current step{review_context}</p>"
+            f"<small>Assigned at {_text(anomaly.get('assigned_at'))}. "
+            f"{_text(anomaly.get('recommendation'))}</small>"
+            "</div></div>"
+        )
+
+    return (
+        '<div class="anomaly-list"><h3>Stuck candidates</h3>'
+        '<p class="anomaly-note">AssignedAt is used as the entry time; complete '
+        "step-transition history is not available in the current API response.</p>"
+        + "".join(alerts)
+        + "</div>"
+    )
+
+
 def render_html_report(jobs: list[dict[str, Any]]) -> str:
     """Render the current job, pipeline, agent, and application data as HTML."""
 
     bottlenecks = detect_step_bottlenecks(jobs)
+    stuck_candidates = detect_stuck_candidates(jobs)
     pipeline_ids = {
         job.get("PipelineTemplateID")
         for job in jobs
@@ -782,6 +947,11 @@ def render_html_report(jobs: list[dict[str, Any]]) -> str:
             for anomaly in bottlenecks
             if str(anomaly["job_id"]) == str(job_id_value)
         ]
+        job_stuck_candidates = [
+            anomaly
+            for anomaly in stuck_candidates
+            if str(anomaly["job_id"]) == str(job_id_value)
+        ]
         job_sections.append(
             '<section class="job-card">'
             '<div class="job-heading">'
@@ -798,6 +968,7 @@ def render_html_report(jobs: list[dict[str, Any]]) -> str:
             "</dl>"
             f"{_render_steps(job.get('PipelineSteps', []))}"
             f"{_render_bottlenecks(job_bottlenecks)}"
+            f"{_render_stuck_candidates(job_stuck_candidates)}"
             "</section>"
         )
 
@@ -830,7 +1001,7 @@ def render_html_report(jobs: list[dict[str, Any]]) -> str:
     h1 {{ font-size: clamp(32px, 5vw, 48px); line-height: 1.05; margin: 0; letter-spacing: -.04em; }}
     h2 {{ margin: 0; font-size: 21px; letter-spacing: -.02em; }}
     .generated {{ color: var(--muted); font-size: 13px; white-space: nowrap; }}
-    .metrics {{ display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 16px; margin-bottom: 28px; }}
+    .metrics {{ display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 16px; margin-bottom: 28px; }}
     .metric, .job-card, .empty-state {{ background: var(--card); border: 1px solid var(--line); border-radius: 16px; box-shadow: 0 10px 26px rgba(31, 41, 74, .05); }}
     .metric {{ padding: 20px; }}
     .metric span {{ display: block; color: var(--muted); font-size: 13px; }}
@@ -848,7 +1019,7 @@ def render_html_report(jobs: list[dict[str, Any]]) -> str:
     td strong, td small {{ display: block; }} td small {{ color: var(--muted); margin-top: 2px; }} .step-number {{ display: inline-grid; place-items: center; width: 22px; height: 22px; margin-right: 8px; border-radius: 6px; background: var(--brand-soft); color: var(--brand); font-size: 12px; font-weight: 800; }}
     .agent + .agent {{ border-top: 1px solid var(--line); margin-top: 10px; padding-top: 10px; }} details {{ margin-top: 7px; }} summary {{ cursor: pointer; color: var(--brand); font-size: 13px; font-weight: 700; }} pre {{ margin: 8px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; background: #111827; color: #e5e7eb; padding: 12px; border-radius: 8px; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }}
     .application-count {{ display: inline-grid; place-items: center; min-width: 28px; height: 28px; padding: 0 8px; border-radius: 99px; background: var(--brand); color: white; font-weight: 800; }} .application-details ul {{ padding-left: 18px; margin: 8px 0 0; }} .application-details li {{ margin: 6px 0; }} .application-details li span {{ display: block; color: var(--muted); font-size: 12px; }} .muted {{ color: var(--muted); font-size: 13px; }} .empty-state {{ padding: 32px; text-align: center; color: var(--muted); }}
-    .anomaly-list {{ margin-top: 20px; border: 1px solid #f2d8a1; background: #fffaf0; border-radius: 12px; padding: 16px; }} .anomaly-list h3 {{ margin: 0 0 10px; font-size: 14px; color: var(--warn); }} .anomaly {{ display: flex; gap: 12px; padding: 12px 0; border-top: 1px solid #f2e4c7; }} .anomaly:first-of-type {{ border-top: 0; }} .anomaly strong, .anomaly p, .anomaly small {{ display: block; }} .anomaly p {{ margin: 2px 0; color: var(--muted); font-size: 13px; }} .anomaly small {{ color: var(--warn); }} .status.warning {{ background: var(--warn-soft); color: var(--warn); }}
+    .anomaly-list {{ margin-top: 20px; border: 1px solid #f2d8a1; background: #fffaf0; border-radius: 12px; padding: 16px; }} .anomaly-list h3 {{ margin: 0 0 10px; font-size: 14px; color: var(--warn); }} .anomaly-note {{ color: var(--muted); font-size: 12px; margin: -4px 0 8px; }} .anomaly {{ display: flex; gap: 12px; padding: 12px 0; border-top: 1px solid #f2e4c7; }} .anomaly:first-of-type {{ border-top: 0; }} .anomaly strong, .anomaly p, .anomaly small {{ display: block; }} .anomaly p {{ margin: 2px 0; color: var(--muted); font-size: 13px; }} .anomaly small {{ color: var(--warn); }} .status.warning {{ background: var(--warn-soft); color: var(--warn); }}
     @media (max-width: 720px) {{ .shell {{ padding: 28px 14px 48px; }} .hero {{ display: block; }} .generated {{ margin-top: 12px; }} .metrics, .job-meta {{ grid-template-columns: repeat(2, 1fr); }} .job-card {{ padding: 18px; }} }}
   </style>
 </head>
@@ -864,6 +1035,7 @@ def render_html_report(jobs: list[dict[str, Any]]) -> str:
       <article class="metric"><span>Pipeline steps</span><strong>{len(steps)}</strong></article>
       <article class="metric"><span>Current applications</span><strong>{application_count}</strong></article>
       <article class="metric"><span>Step bottlenecks</span><strong>{len(bottlenecks)}</strong></article>
+      <article class="metric"><span>Stuck candidates</span><strong>{len(stuck_candidates)}</strong></article>
     </section>
     {empty_message}
     {''.join(job_sections)}

@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 import pytest
 
 from app import (
@@ -5,6 +7,7 @@ from app import (
     add_application_details_to_steps,
     add_pipeline_template_names,
     detect_step_bottlenecks,
+    detect_stuck_candidates,
     fetch_all_jobs,
     fetch_applications_for_step,
     get_pipeline_template_name,
@@ -496,3 +499,99 @@ def test_render_html_report_shows_bottleneck_context_and_guidance():
     assert "Step bottlenecks</span><strong>2" in report
     assert "Compared with 1 other pipeline(s)" in report
     assert "Speed up manual review through automation." in report
+
+
+def test_detect_stuck_candidates_uses_warning_critical_and_review_severity():
+    jobs = [
+        {
+            "PaulsjobJobID": 99,
+            "JobPositionTitle": "Customer Success Manager",
+            "PipelineSteps": [
+                {
+                    "ID": "step-1",
+                    "Name": "Application review",
+                    "Applications": [
+                        {
+                            "ID": "app-medium",
+                            "Person": {"FullName": "Ada Lovelace"},
+                            "Application": {
+                                "AssignedAt": "2026-09-05T12:00:00Z",
+                                "HumanReview": False,
+                                "AgentReview": False,
+                            },
+                        },
+                        {
+                            "ID": "app-critical",
+                            "Person": {"FullName": "Grace Hopper"},
+                            "Application": {
+                                "AssignedAt": "2026-08-20T12:00:00Z",
+                                "HumanReview": False,
+                                "AgentReview": False,
+                            },
+                        },
+                        {
+                            "ID": "app-review",
+                            "Person": {"FullName": "Katherine Johnson"},
+                            "Application": {
+                                "AssignedAt": "2026-09-04T12:00:00Z",
+                                "HumanReview": True,
+                                "AgentReview": False,
+                            },
+                        },
+                        {
+                            "ID": "app-current",
+                            "Person": {"FullName": "Alan Turing"},
+                            "Application": {
+                                "AssignedAt": "2026-09-08T12:00:00Z",
+                                "HumanReview": False,
+                                "AgentReview": False,
+                            },
+                        },
+                    ],
+                }
+            ],
+        }
+    ]
+
+    result = detect_stuck_candidates(
+        jobs, now=datetime(2026, 9, 9, 12, tzinfo=timezone.utc)
+    )
+
+    assert [item["application_id"] for item in result] == [
+        "app-medium",
+        "app-critical",
+        "app-review",
+    ]
+    assert result[0]["severity"] == "medium"
+    assert result[1]["severity"] == "high"
+    assert result[2]["severity"] == "high"
+    assert result[0]["candidate_name"] == "Ada Lovelace"
+    assert result[0]["step_name"] == "Application review"
+
+
+def test_render_html_report_shows_stuck_candidate_metric_and_evidence():
+    jobs = [
+        {
+            "PaulsjobJobID": 99,
+            "JobPositionTitle": "Customer Success Manager",
+            "PipelineSteps": [
+                {
+                    "Name": "Application review",
+                    "Applications": [
+                        {
+                            "Person": {"FullName": "Ada Lovelace"},
+                            "Application": {
+                                "AssignedAt": "2026-09-01T12:00:00Z"
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+    ]
+
+    report = render_html_report(jobs)
+
+    assert "Stuck candidates</span><strong>1" in report
+    assert "Ada Lovelace" in report
+    assert "complete step-transition history is not available" in report
