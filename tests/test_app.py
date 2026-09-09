@@ -9,6 +9,7 @@ from app import (
     detect_step_bottlenecks,
     detect_stuck_applications,
     detect_agent_reviews,
+    detect_suspicious_applications,
     fetch_all_jobs,
     fetch_applications_for_step,
     get_pipeline_template_name,
@@ -692,3 +693,104 @@ def test_render_html_report_shows_agent_review_backlog():
     assert "Agent review backlog</span><strong>1" in report
     assert "Agent review · AI screening" in report
     assert "System prompt configured" in report
+
+
+def test_detect_suspicious_applications_ignores_normal_step_movement():
+    jobs = [
+        {
+            "PaulsjobJobID": 99,
+            "JobPositionTitle": "Customer Success Manager",
+            "PipelineSteps": [
+                {
+                    "Name": "Screening",
+                    "Applications": [
+                        {
+                            "Person": {"PersonSlug": "ada", "FullName": "Ada Lovelace"},
+                            "Application": {"ID": "app-1", "ApplicationDate": "2026-09-01"},
+                        },
+                        {
+                            "Person": {"PersonSlug": "ada", "FullName": "Ada Lovelace"},
+                            "Application": {"ID": "app-2", "ApplicationDate": "2026-09-02"},
+                        },
+                    ],
+                },
+                {
+                    "Name": "Interview",
+                    "Applications": [
+                        {
+                            "Person": {"PersonSlug": "ada", "FullName": "Ada Lovelace"},
+                            "Application": {"ID": "app-1", "ApplicationDate": "2026-09-01"},
+                        }
+                    ],
+                },
+            ],
+        }
+    ]
+
+    result = detect_suspicious_applications(jobs)
+
+    assert len(result) == 1
+    assert result[0]["application_count"] == 2
+    assert result[0]["severity"] == "medium"
+    assert result[0]["applications"][0]["steps"] == ["Interview", "Screening"]
+
+
+def test_detect_suspicious_applications_marks_three_distinct_ids_high():
+    jobs = [
+        {
+            "PaulsjobJobID": 99,
+            "PipelineSteps": [
+                {
+                    "Name": "Screening",
+                    "Applications": [
+                        {
+                            "PersonSlug": "ada",
+                            "Application": {"ID": "app-1"},
+                        },
+                        {
+                            "PersonSlug": "ada",
+                            "Application": {"ID": "app-2"},
+                        },
+                        {
+                            "PersonSlug": "ada",
+                            "Application": {"ID": "app-3"},
+                        },
+                    ],
+                }
+            ],
+        }
+    ]
+
+    result = detect_suspicious_applications(jobs)
+
+    assert result[0]["severity"] == "high"
+    assert result[0]["application_count"] == 3
+
+
+def test_render_html_report_shows_suspicious_application_metric():
+    jobs = [
+        {
+            "PaulsjobJobID": 99,
+            "PipelineSteps": [
+                {
+                    "Name": "Screening",
+                    "Applications": [
+                        {
+                            "Person": {"PersonSlug": "ada", "FullName": "Ada Lovelace"},
+                            "Application": {"ID": "app-1"},
+                        },
+                        {
+                            "Person": {"PersonSlug": "ada", "FullName": "Ada Lovelace"},
+                            "Application": {"ID": "app-2"},
+                        },
+                    ],
+                }
+            ],
+        }
+    ]
+
+    report = render_html_report(jobs)
+
+    assert "Suspicious applications</span><strong>2" in report
+    assert "Suspicious applications · Ada Lovelace" in report
+    assert "Did the candidate intentionally apply more than once?" in report

@@ -27,6 +27,8 @@ STUCK_CRITICAL_DAYS = 10
 AGENT_REVIEW_WARNING_HOURS = 12
 AGENT_REVIEW_CRITICAL_HOURS = 24
 AGENT_REVIEW_GROUP_HIGH_COUNT = 2
+SUSPICIOUS_APPLICATION_MIN_COUNT = 2
+SUSPICIOUS_APPLICATION_HIGH_COUNT = 3
 
 
 class ApiError(RuntimeError):
@@ -862,6 +864,124 @@ def detect_agent_reviews(
     return results
 
 
+def _person_slug(application: dict[str, Any]) -> str | None:
+    """Read PersonSlug from the common API response locations."""
+
+    person = application.get("Person")
+    sources = [application, _application_data(application)]
+    if isinstance(person, dict):
+        sources.append(person)
+    for source in sources:
+        for key in ("PersonSlug", "person_slug", "Slug"):
+            value = source.get(key)
+            if value is not None and str(value).strip():
+                return str(value).strip()
+    return None
+
+
+def detect_suspicious_applications(
+    jobs: list[dict[str, Any]],
+    *,
+    minimum_count: int = SUSPICIOUS_APPLICATION_MIN_COUNT,
+    high_count: int = SUSPICIOUS_APPLICATION_HIGH_COUNT,
+) -> list[dict[str, Any]]:
+    """Find candidates with multiple distinct applications for one job.
+
+    The same application can appear under more than one current step while it
+    moves through a pipeline. It is counted once by application ID, so normal
+    movement does not create a duplicate alert.
+    """
+
+    if minimum_count < 2 or high_count < minimum_count:
+        raise ValueError("high_count must be greater than or equal to minimum_count.")
+
+    grouped: dict[tuple[str, str], dict[str, Any]] = {}
+    for job in jobs:
+        job_id = job.get("PaulsjobJobID", job.get("JobPositionID", "unknown"))
+        for step in job.get("PipelineSteps", []):
+            if not isinstance(step, dict):
+                continue
+            applications = step.get("Applications", [])
+            if not isinstance(applications, list):
+                continue
+            for application in applications:
+                if not isinstance(application, dict):
+                    continue
+                slug = _person_slug(application)
+                application_id = _application_field(
+                    application, "ID", application.get("id")
+                )
+                if slug is None or application_id is None:
+                    continue
+
+                key = (str(job_id), slug)
+                group = grouped.setdefault(
+                    key,
+                    {
+                        "type": "suspicious_application",
+                        "job_id": job_id,
+                        "job_title": job.get("JobPositionTitle"),
+                        "person_slug": slug,
+                        "candidate_name": (
+                            application.get("Person", {}).get("FullName")
+                            if isinstance(application.get("Person"), dict)
+                            else None
+                        ),
+                        "applications_by_id": {},
+                    },
+                )
+                application_key = str(application_id)
+                detail = group["applications_by_id"].setdefault(
+                    application_key,
+                    {
+                        "application_id": application_id,
+                        "created_at": next(
+                            (
+                                _application_field(application, field)
+                                for field in (
+                                    "ApplicationDate",
+                                    "CreatedAt",
+                                    "ApplicationCreatedAt",
+                                )
+                                if _application_field(application, field) is not None
+                            ),
+                            None,
+                        ),
+                        "steps": set(),
+                    },
+                )
+                step_name = step.get("Name", "Unnamed step")
+                detail["steps"].add(str(step_name))
+
+    anomalies = []
+    for group in grouped.values():
+        applications = list(group["applications_by_id"].values())
+        if len(applications) < minimum_count:
+            continue
+        for application in applications:
+            application["steps"] = sorted(application["steps"])
+        anomalies.append(
+            {
+                **group,
+                "applications": applications,
+                "application_count": len(applications),
+                "severity": "high" if len(applications) >= high_count else "medium",
+                "recommendation": (
+                    "Compare application IDs and timestamps, check the source or "
+                    "external ATS integration, and mark records for manual review "
+                    "or consolidation rather than deleting them automatically."
+                ),
+                "guiding_questions": [
+                    "Did the candidate intentionally apply more than once?",
+                    "Is an external ATS resubmitting applications?",
+                    "Should duplicate records be manually consolidated?",
+                ],
+            }
+        )
+
+    return anomalies
+
+
 def _text(value: Any, fallback: str = "—") -> str:
     """Return a safely escaped display value for the HTML report."""
 
@@ -1062,12 +1182,54 @@ def _render_agent_reviews(anomalies: list[dict[str, Any]]) -> str:
     return '<div class="anomaly-list"><h3>Agent review</h3>' + "".join(alerts) + "</div>"
 
 
+def _render_suspicious_applications(anomalies: list[dict[str, Any]]) -> str:
+    if not anomalies:
+        return ""
+
+    alerts = []
+    for anomaly in anomalies:
+        severity = anomaly["severity"]
+        application_rows = "".join(
+            "<li>"
+            f"<strong>{_text(application.get('application_id'))}</strong> · "
+            f"{_text(', '.join(application.get('steps', [])))}"
+            f" · created {_text(application.get('created_at'))}"
+            "</li>"
+            for application in anomaly.get("applications", [])
+        )
+        guiding_questions = "".join(
+            f"<li>{_text(question)}</li>"
+            for question in anomaly.get("guiding_questions", [])
+        )
+        alerts.append(
+            '<div class="anomaly">'
+            f"<span class=\"status {'negative' if severity == 'high' else 'warning'}\">"
+            f"{_text(severity).upper()}</span>"
+            "<div>"
+            f"<strong>Suspicious applications · "
+            f"{_text(anomaly.get('candidate_name'), 'Unknown candidate')}</strong>"
+            f"<p>{anomaly['application_count']} distinct applications for this job · "
+            f"PersonSlug: {_text(anomaly.get('person_slug'))}</p>"
+            f"<details><summary>Application evidence</summary><ul>{application_rows}</ul></details>"
+            f"<details><summary>Guiding questions</summary><ul>{guiding_questions}</ul></details>"
+            f"<small>{_text(anomaly.get('recommendation'))}</small>"
+            "</div></div>"
+        )
+
+    return (
+        '<div class="anomaly-list"><h3>Suspicious applications</h3>'
+        + "".join(alerts)
+        + "</div>"
+    )
+
+
 def render_html_report(jobs: list[dict[str, Any]]) -> str:
     """Render the current job, pipeline, agent, and application data as HTML."""
 
     bottlenecks = detect_step_bottlenecks(jobs)
     stuck_applications = detect_stuck_applications(jobs)
     agent_reviews = detect_agent_reviews(jobs)
+    suspicious_applications = detect_suspicious_applications(jobs)
     pipeline_ids = {
         job.get("PipelineTemplateID")
         for job in jobs
@@ -1110,6 +1272,11 @@ def render_html_report(jobs: list[dict[str, Any]]) -> str:
             for anomaly in agent_reviews
             if str(anomaly["job_id"]) == str(job_id_value)
         ]
+        job_suspicious_applications = [
+            anomaly
+            for anomaly in suspicious_applications
+            if str(anomaly["job_id"]) == str(job_id_value)
+        ]
         job_sections.append(
             '<section class="job-card">'
             '<div class="job-heading">'
@@ -1128,6 +1295,7 @@ def render_html_report(jobs: list[dict[str, Any]]) -> str:
             f"{_render_bottlenecks(job_bottlenecks)}"
             f"{_render_stuck_applications(job_stuck_applications)}"
             f"{_render_agent_reviews(job_agent_reviews)}"
+            f"{_render_suspicious_applications(job_suspicious_applications)}"
             "</section>"
         )
 
@@ -1160,7 +1328,7 @@ def render_html_report(jobs: list[dict[str, Any]]) -> str:
     h1 {{ font-size: clamp(32px, 5vw, 48px); line-height: 1.05; margin: 0; letter-spacing: -.04em; }}
     h2 {{ margin: 0; font-size: 21px; letter-spacing: -.02em; }}
     .generated {{ color: var(--muted); font-size: 13px; white-space: nowrap; }}
-    .metrics {{ display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 16px; margin-bottom: 28px; }}
+    .metrics {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 16px; margin-bottom: 28px; }}
     .metric, .job-card, .empty-state {{ background: var(--card); border: 1px solid var(--line); border-radius: 16px; box-shadow: 0 10px 26px rgba(31, 41, 74, .05); }}
     .metric {{ padding: 20px; }}
     .metric span {{ display: block; color: var(--muted); font-size: 13px; }}
@@ -1196,6 +1364,7 @@ def render_html_report(jobs: list[dict[str, Any]]) -> str:
       <article class="metric"><span>Step bottlenecks</span><strong>{len(bottlenecks)}</strong></article>
       <article class="metric"><span>Stuck applications</span><strong>{len(stuck_applications)}</strong></article>
       <article class="metric"><span>Agent review backlog</span><strong>{sum(item['application_count'] for item in agent_reviews)}</strong></article>
+      <article class="metric"><span>Suspicious applications</span><strong>{sum(item['application_count'] for item in suspicious_applications)}</strong></article>
     </section>
     {empty_message}
     {''.join(job_sections)}
