@@ -19,7 +19,7 @@ ENDPOINT = "/recruiting/jobs/search-jobs"
 PIPELINE_TEMPLATE_ENDPOINT = "/recruiting/job-step-templates/pipelines"
 APPLICATION_ENDPOINT = "/recruiting/applications/search-applications"
 REPORT_PATH = Path("report.html")
-BOTTLENECK_MIN_APPLICATIONS = 1
+BOTTLENECK_MIN_APPLICATIONS = 2
 BOTTLENECK_MIN_SHARE = 0.50
 BOTTLENECK_MIN_RATIO = 2.0
 
@@ -491,6 +491,27 @@ def detect_step_bottlenecks(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
     bottlenecks: list[dict[str, Any]] = []
 
+    # Compare like-named steps across distinct pipeline templates. A pipeline
+    # template is the useful comparison unit here: if it is used by several
+    # jobs, aggregate those jobs before calculating the peer average.
+    pipeline_step_counts: dict[str, dict[str, list[int]]] = {}
+    for job in jobs:
+        pipeline_id = job.get("PipelineTemplateID")
+        if not pipeline_id:
+            continue
+        for step in job.get("PipelineSteps", []):
+            if not isinstance(step, dict):
+                continue
+            step_name = step.get("Name")
+            if not step_name:
+                continue
+            normalized_name = str(step_name).strip().casefold()
+            count = step.get("ApplicationCount", 0)
+            count = count if isinstance(count, int) else 0
+            pipeline_step_counts.setdefault(normalized_name, {}).setdefault(
+                str(pipeline_id), []
+            ).append(max(0, count))
+
     for job in jobs:
         steps = [
             step
@@ -523,6 +544,29 @@ def detect_step_bottlenecks(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
             if share < BOTTLENECK_MIN_SHARE and ratio < BOTTLENECK_MIN_RATIO:
                 continue
 
+            step_name = step.get("Name", "Unnamed step")
+            normalized_name = str(step_name).strip().casefold()
+            pipeline_id = job.get("PipelineTemplateID")
+            peer_counts = []
+            if pipeline_id:
+                for peer_pipeline_id, peer_job_counts in pipeline_step_counts.get(
+                    normalized_name, {}
+                ).items():
+                    if peer_pipeline_id == str(pipeline_id):
+                        continue
+                    peer_counts.append(
+                        {
+                            "pipeline_id": peer_pipeline_id,
+                            "application_count": sum(peer_job_counts),
+                        }
+                    )
+            peer_average = (
+                sum(item["application_count"] for item in peer_counts)
+                / len(peer_counts)
+                if peer_counts
+                else None
+            )
+
             bottlenecks.append(
                 {
                     "type": "step_bottleneck",
@@ -530,16 +574,34 @@ def detect_step_bottlenecks(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "job_id": job_id,
                     "job_title": job.get("JobPositionTitle"),
                     "step_id": step.get("ID"),
-                    "step_name": step.get("Name", "Unnamed step"),
+                    "step_name": step_name,
                     "application_count": count,
                     "total_applications": total_applications,
                     "share": share,
                     "comparison_average": comparison_average,
                     "ratio": ratio,
-                    "recommendation": (
-                        "Review this step for manual-workload, automation, or "
-                        "next-step transition issues."
-                    ),
+                    "peer_pipeline_count": len(peer_counts),
+                    "peer_average": peer_average,
+                    "peer_ratio": count / peer_average if peer_average else None,
+                    "peer_pipeline_counts": peer_counts,
+                    "guiding_questions": [
+                        {
+                            "question": "Is this step mostly manual?",
+                            "action": "Speed up manual review through automation.",
+                        },
+                        {
+                            "question": "Are next-step transition rules working?",
+                            "action": "Review pipeline transition rules.",
+                        },
+                        {
+                            "question": "Is the screening stage unnecessarily difficult?",
+                            "action": "Simplify the screening process.",
+                        },
+                        {
+                            "question": "Is this a temporary volume spike?",
+                            "action": "Compare this period with other reporting periods.",
+                        },
+                    ],
                 }
             )
 
@@ -648,6 +710,25 @@ def _render_bottlenecks(bottlenecks: list[dict[str, Any]]) -> str:
     alerts = []
     for anomaly in bottlenecks:
         severity = anomaly["severity"]
+        peer_pipeline_count = anomaly.get("peer_pipeline_count", 0)
+        peer_average = anomaly.get("peer_average")
+        if peer_average is None:
+            peer_comparison = "No comparable step found in another pipeline."
+        else:
+            peer_comparison = (
+                f"Compared with {peer_pipeline_count} other pipeline(s): "
+                f"{peer_average:.1f} average applications for this step name"
+            )
+            peer_ratio = anomaly.get("peer_ratio")
+            if peer_ratio is not None:
+                peer_comparison += f" ({peer_ratio:.1f}× this volume)"
+            peer_comparison += "."
+        questions = "".join(
+            "<li>"
+            f"<strong>{_text(item.get('question'))}</strong> → "
+            f"{_text(item.get('action'))}</li>"
+            for item in anomaly.get("guiding_questions", [])
+        )
         alerts.append(
             '<div class="anomaly">'
             f"<span class=\"status {'negative' if severity == 'high' else 'warning'}\">"
@@ -657,7 +738,8 @@ def _render_bottlenecks(bottlenecks: list[dict[str, Any]]) -> str:
             f"<p>{anomaly['application_count']} applications · "
             f"{anomaly['share']:.0%} of this job · "
             f"{anomaly['ratio']:.1f}× the average of other steps</p>"
-            f"<small>{_text(anomaly['recommendation'])}</small>"
+            f"<p>{_text(peer_comparison)}</p>"
+            f"<details><summary>Guiding questions</summary><ul>{questions}</ul></details>"
             "</div></div>"
         )
 

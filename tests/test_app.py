@@ -432,10 +432,67 @@ def test_detect_step_bottlenecks_ignores_small_balanced_steps():
         {
             "PaulsjobJobID": 99,
             "PipelineSteps": [
-                {"ID": "step-1", "ApplicationCount": 4},
-                {"ID": "step-2", "ApplicationCount": 3},
+                {"ID": "step-1", "ApplicationCount": 2},
+                {"ID": "step-2", "ApplicationCount": 2},
+                {"ID": "step-3", "ApplicationCount": 2},
             ],
         }
     ]
 
     assert detect_step_bottlenecks(jobs) == []
+
+
+def test_detect_step_bottlenecks_compares_same_step_across_pipelines():
+    jobs = [
+        {
+            "PaulsjobJobID": 1,
+            "PipelineTemplateID": "pipeline-a",
+            "PipelineSteps": [
+                {"Name": "Screening", "ApplicationCount": 6},
+                {"Name": "Interview", "ApplicationCount": 1},
+            ],
+        },
+        {
+            "PaulsjobJobID": 2,
+            "PipelineTemplateID": "pipeline-b",
+            "PipelineSteps": [
+                {"Name": "Screening", "ApplicationCount": 2},
+                {"Name": "Interview", "ApplicationCount": 1},
+            ],
+        },
+    ]
+
+    result = detect_step_bottlenecks(jobs)
+
+    first_screening = next(item for item in result if item["job_id"] == 1)
+    assert first_screening["peer_pipeline_count"] == 1
+    assert first_screening["peer_average"] == 2
+    assert first_screening["peer_ratio"] == 3
+
+
+def test_render_html_report_shows_bottleneck_context_and_guidance():
+    jobs = [
+        {
+            "PaulsjobJobID": 1,
+            "JobPositionTitle": "Support Specialist",
+            "PipelineTemplateID": "pipeline-a",
+            "PipelineSteps": [
+                {"Name": "Screening", "ApplicationCount": 6},
+                {"Name": "Interview", "ApplicationCount": 1},
+            ],
+        },
+        {
+            "PaulsjobJobID": 2,
+            "PipelineTemplateID": "pipeline-b",
+            "PipelineSteps": [
+                {"Name": "Screening", "ApplicationCount": 2},
+                {"Name": "Interview", "ApplicationCount": 1},
+            ],
+        },
+    ]
+
+    report = render_html_report(jobs)
+
+    assert "Step bottlenecks</span><strong>2" in report
+    assert "Compared with 1 other pipeline(s)" in report
+    assert "Speed up manual review through automation." in report
