@@ -1272,14 +1272,15 @@ def _render_bottlenecks(bottlenecks: list[dict[str, Any]]) -> str:
             f"<span class=\"status {'negative' if severity == 'high' else 'warning'}\">"
             f"{_text(severity).upper()}</span>"
             "<div>"
-            f"<strong>Step bottleneck · {_text(anomaly['step_name'])}</strong>"
-            f"<p>{anomaly['application_count']} applications</p>"
-            f"<small>{_text(peer_comparison)}</small>"
-            f"<details><summary>Guiding questions</summary><ul>{questions}</ul></details>"
+            '<strong class="anomaly-name">Step bottleneck</strong>'
+            f"<strong class=\"anomaly-detail\">{_text(anomaly['step_name'])}</strong>"
+            f"<p class=\"anomaly-evidence\">{anomaly['application_count']} applications</p>"
+            f"<p class=\"anomaly-evidence\">{_text(peer_comparison)}</p>"
+            f"<details class=\"guiding-question\"><summary>Guiding question:</summary><ul>{questions}</ul></details>"
             "</div></div>"
         )
 
-    return '<div class="anomaly-list"><h3>Attention needed</h3>' + "".join(alerts) + "</div>"
+    return '<div class="anomaly-list">' + "".join(alerts) + "</div>"
 
 
 def _render_stuck_applications(anomalies: list[dict[str, Any]]) -> str:
@@ -1302,18 +1303,21 @@ def _render_stuck_applications(anomalies: list[dict[str, Any]]) -> str:
             f"<span class=\"status {'negative' if severity == 'high' else 'warning'}\">"
             f"{_text(severity).upper()}</span>"
             "<div>"
-            f"<strong>{_text(anomaly.get('candidate_name'), 'Unnamed candidate')}</strong>"
-            f"<p>{_text(anomaly.get('step_name'), 'Unnamed step')} · "
+            '<strong class="anomaly-name">Stuck applications</strong>'
+            f"<strong class=\"anomaly-detail\">{_text(anomaly.get('candidate_name'), 'Unnamed candidate')} · "
+            f"{_text(anomaly.get('step_name'), 'Unnamed step')}</strong>"
+            f"<p class=\"anomaly-evidence\">"
             f"{anomaly['days_in_step']:.1f} days in current step{review_context}</p>"
-            f"<small>Assigned at {_text(anomaly.get('assigned_at'))}. "
+            f"<small class=\"anomaly-evidence\">Assigned at {_text(anomaly.get('assigned_at'))}. "
             f"{_text(anomaly.get('recommendation'))}</small>"
+            '<details class="guiding-question"><summary>Guiding question:</summary>'
+            '<ul><li>Is someone expected to review this application manually?</li>'
+            '<li>Is a decision missing or should the application be moved, rejected, or escalated?</li></ul></details>'
             "</div></div>"
         )
 
     return (
-        '<div class="anomaly-list"><h3>Stuck applications</h3>'
-        '<p class="anomaly-note">AssignedAt is used as the entry time; complete '
-        "step-transition history is not available in the current API response.</p>"
+        '<div class="anomaly-list">'
         + "".join(alerts)
         + "</div>"
     )
@@ -1341,20 +1345,19 @@ def _render_agent_reviews(anomalies: list[dict[str, Any]]) -> str:
             f"<span class=\"status {'negative' if severity == 'high' else 'warning'}\">"
             f"{_text(severity).upper()}</span>"
             "<div>"
-            f"<strong>{_text(review_mode_label)} · "
+            '<strong class="anomaly-name">Agent review</strong>'
+            f"<strong class=\"anomaly-detail\">{_text(review_mode_label)} · "
             f"{_text(anomaly.get('step_name'))}</strong>"
-            f"<p>{anomaly['application_count']} application(s) waiting · "
+            f"<p class=\"anomaly-evidence\">{anomaly['application_count']} application(s) waiting · "
             f"Agent: {_text(agent_names)} · {_text(prompt_status)}</p>"
-            f"<p>Oldest waiting: {anomaly['oldest_waiting_hours']:.1f} hours</p>"
-            f"<p>Confirmed: {anomaly['confirmed_application_count']} · "
-            f"Handoff verification: {anomaly['handoff_application_count']}</p>"
-            f"<p><strong>Guiding question:</strong> "
-            f"{_text(anomaly.get('guiding_question'))}</p>"
-            f"<small>{_text(anomaly.get('recommendation'))}</small>"
+            f"<p class=\"anomaly-evidence\">Oldest waiting: {anomaly['oldest_waiting_hours']:.1f} hours</p>"
+            f"<small class=\"anomaly-evidence\">{_text(anomaly.get('recommendation'))}</small>"
+            f"<details class=\"guiding-question\"><summary>Guiding question:</summary>"
+            f"<p>{_text(anomaly.get('guiding_question'))}</p></details>"
             "</div></div>"
         )
 
-    return '<div class="anomaly-list"><h3>Agent review</h3>' + "".join(alerts) + "</div>"
+    return '<div class="anomaly-list">' + "".join(alerts) + "</div>"
 
 
 def _render_suspicious_applications(anomalies: list[dict[str, Any]]) -> str:
@@ -1389,19 +1392,19 @@ def _render_suspicious_applications(anomalies: list[dict[str, Any]]) -> str:
             f"<span class=\"status {'negative' if severity == 'high' else 'warning'}\">"
             f"{_text(severity).upper()}</span>"
             "<div>"
-            f"<strong>Suspicious applications · "
+            '<strong class="anomaly-name">Suspicious applications</strong>'
+            f"<strong class=\"anomaly-detail\">"
             f"{_text(anomaly.get('candidate_name'), 'Unknown candidate')}</strong>"
-            f"<p>{anomaly['application_count']} distinct applications for this job · "
-            f"PersonSlug: {_text(anomaly.get('person_slug'))}</p>"
+            f"<p class=\"anomaly-evidence\">{anomaly['application_count']} distinct applications for this job</p>"
             f"{name_match_note}"
             f"<details><summary>Application evidence</summary><ul>{application_rows}</ul></details>"
-            f"<details><summary>Guiding questions</summary><ul>{guiding_questions}</ul></details>"
-            f"<small>{_text(anomaly.get('recommendation'))}</small>"
+            f"<details class=\"guiding-question\"><summary>Guiding question:</summary><ul>{guiding_questions}</ul></details>"
+            f"<small class=\"anomaly-evidence\">{_text(anomaly.get('recommendation'))}</small>"
             "</div></div>"
         )
 
     return (
-        '<div class="anomaly-list"><h3>Suspicious applications</h3>'
+        '<div class="anomaly-list">'
         + "".join(alerts)
         + "</div>"
     )
@@ -1546,7 +1549,7 @@ def render_html_report(jobs: list[dict[str, Any]]) -> str:
     td strong, td small {{ display: block; }} td small {{ color: var(--muted); margin-top: 2px; }} .step-number {{ display: inline-grid; place-items: center; width: 22px; height: 22px; margin-right: 8px; border-radius: 6px; background: var(--brand-soft); color: var(--brand); font-size: 12px; font-weight: 800; }}
     .agent + .agent {{ border-top: 1px solid var(--line); margin-top: 10px; padding-top: 10px; }} details {{ margin-top: 7px; }} summary {{ cursor: pointer; color: var(--brand); font-size: 13px; font-weight: 700; }} pre {{ margin: 8px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; background: #111827; color: #e5e7eb; padding: 12px; border-radius: 8px; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }}
     .application-count {{ display: inline-grid; place-items: center; min-width: 28px; height: 28px; padding: 0 8px; border-radius: 99px; background: var(--brand); color: white; font-weight: 800; }} .application-count.empty {{ background: transparent; color: var(--muted); padding-left: 0; }} .application-details ul {{ padding-left: 18px; margin: 8px 0 0; }} .application-details li {{ margin: 6px 0; }} .application-details li span {{ display: block; color: var(--muted); font-size: 12px; }} .step-details {{ margin-top: 10px; }} .step-details p {{ margin: 8px 0; color: var(--muted); font-size: 13px; }} .step-details p strong {{ color: var(--ink); margin-right: 5px; }} .muted {{ color: var(--muted); font-size: 13px; }} .empty-state {{ padding: 32px; text-align: center; color: var(--muted); }}
-    .anomaly-list {{ margin-top: 20px; border: 1px solid #f2d8a1; background: #fffaf0; border-radius: 12px; padding: 16px; }} .anomaly-list h3 {{ margin: 0 0 10px; font-size: 14px; color: var(--warn); }} .anomaly-note {{ color: var(--muted); font-size: 12px; margin: -4px 0 8px; }} .anomaly {{ display: flex; gap: 12px; padding: 12px 0; border-top: 1px solid #f2e4c7; }} .anomaly:first-of-type {{ border-top: 0; }} .anomaly strong, .anomaly p, .anomaly small {{ display: block; }} .anomaly p {{ margin: 2px 0; color: var(--muted); font-size: 13px; }} .anomaly small {{ color: var(--warn); }} .status.warning {{ background: var(--warn-soft); color: var(--warn); }}
+    .anomaly-list {{ margin-top: 20px; border: 1px solid #f2d8a1; background: #fffaf0; border-radius: 12px; padding: 16px; }} .anomaly-list h3 {{ margin: 0 0 10px; font-size: 14px; color: var(--warn); }} .anomaly-note {{ color: var(--muted); font-size: 12px; margin: -4px 0 8px; }} .anomaly {{ display: flex; gap: 12px; padding: 12px 0; border-top: 1px solid #f2e4c7; }} .anomaly:first-of-type {{ border-top: 0; }} .anomaly strong, .anomaly p, .anomaly small {{ display: block; }} .anomaly-name {{ color: var(--warn); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }} .anomaly-detail {{ color: var(--ink); font-size: 15px; margin-top: 2px; }} .anomaly p {{ margin: 4px 0; color: var(--muted); font-size: 13px; }} .anomaly small.anomaly-evidence {{ color: var(--muted); font-size: 12px; }} .guiding-question {{ margin-top: 10px; }} .guiding-question summary {{ display: inline-block; padding: 5px 9px; border-radius: 7px; background: var(--brand-soft); color: #5044bc; }} .guiding-question ul, .guiding-question p {{ margin: 8px 0 0; color: var(--muted); font-size: 13px; }} .status.warning {{ background: var(--warn-soft); color: var(--warn); }}
     @media (max-width: 720px) {{ .shell {{ padding: 28px 14px 48px; }} .hero {{ display: block; }} .generated {{ margin-top: 12px; }} .metrics, .job-meta {{ grid-template-columns: repeat(2, 1fr); }} .job-card {{ padding: 18px; }} }}
   </style>
 </head>
@@ -1557,7 +1560,7 @@ def render_html_report(jobs: list[dict[str, Any]]) -> str:
       <p class="generated">Generated {generated_at}</p>
     </header>
     <section class="dashboard-group" aria-labelledby="pipeline-summary">
-      <h2 id="pipeline-summary">Recruiting pipeline overview</h2>
+      <h2 id="pipeline-summary">Active pipelines</h2>
       <div class="metrics">
         <article class="metric"><span>Jobs</span><strong>{len(jobs)}</strong></article>
         <article class="metric"><span>Pipelines</span><strong>{len(pipeline_ids)}</strong></article>

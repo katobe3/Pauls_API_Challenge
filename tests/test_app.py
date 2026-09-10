@@ -400,7 +400,7 @@ def test_render_html_report_includes_jobs_steps_agents_and_applications(tmp_path
     report = render_html_report(jobs)
     report_path = write_html_report(jobs, tmp_path / "report.html")
 
-    assert "Recruiting pipeline overview" in report
+    assert "Active pipelines" in report
     assert "Customer Success Manager" in report
     assert "Standard pipeline" in report
     assert "Screening agent" in report
@@ -410,6 +410,7 @@ def test_render_html_report_includes_jobs_steps_agents_and_applications(tmp_path
     assert "<th>Pipeline step</th><th>Applications</th>" in report
     assert "Location" not in report
     assert "Pipeline ID" not in report
+    assert "Attention needed" not in report
     assert report_path.read_text(encoding="utf-8") == report
 
 
@@ -631,7 +632,6 @@ def test_render_html_report_shows_stuck_application_metric_and_evidence():
 
     assert "Stuck applications</span><strong>1" in report
     assert "Ada Lovelace" in report
-    assert "complete step-transition history is not available" in report
 
 
 def test_detect_agent_reviews_groups_waiting_applications_and_escalates():
@@ -726,7 +726,8 @@ def test_render_html_report_shows_agent_review_backlog():
     report = render_html_report(jobs)
 
     assert "Agent review backlog</span><strong>1" in report
-    assert "Confirmed agent backlog · AI screening" in report
+    assert "Confirmed agent backlog" in report
+    assert "AI screening" in report
     assert "System prompt configured" in report
 
 
@@ -903,5 +904,6 @@ def test_render_html_report_shows_suspicious_application_metric():
 
     assert "Suspicious applications</span><strong>2" in report
     assert '<article class="metric warning"><span>Suspicious applications' in report
-    assert "Suspicious applications · Ada Lovelace" in report
+    assert "Suspicious applications" in report
+    assert "Ada Lovelace" in report
     assert "Did the candidate intentionally apply more than once?" in report
