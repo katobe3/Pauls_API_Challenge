@@ -575,6 +575,37 @@ def test_detect_stuck_applications_uses_warning_critical_and_review_severity():
     assert result[0]["step_name"] == "Application review"
 
 
+def test_detect_stuck_applications_flags_exactly_two_days_as_medium():
+    jobs = [
+        {
+            "PaulsjobJobID": 99,
+            "PipelineSteps": [
+                {
+                    "Name": "Application review",
+                    "Applications": [
+                        {
+                            "ID": "app-two-days",
+                            "Application": {
+                                "AssignedAt": "2026-09-07T12:00:00Z",
+                                "HumanReview": False,
+                                "AgentReview": False,
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+    ]
+
+    result = detect_stuck_applications(
+        jobs, now=datetime(2026, 9, 9, 12, tzinfo=timezone.utc)
+    )
+
+    assert len(result) == 1
+    assert result[0]["days_in_step"] == 2
+    assert result[0]["severity"] == "medium"
+
+
 def test_render_html_report_shows_stuck_application_metric_and_evidence():
     jobs = [
         {
@@ -695,8 +726,45 @@ def test_render_html_report_shows_agent_review_backlog():
     report = render_html_report(jobs)
 
     assert "Agent review backlog</span><strong>1" in report
-    assert "Agent review · AI screening" in report
+    assert "Confirmed agent backlog · AI screening" in report
     assert "System prompt configured" in report
+
+
+def test_detect_agent_reviews_flags_possible_delay_when_agent_review_is_false():
+    jobs = [
+        {
+            "PaulsjobJobID": 99,
+            "PipelineSteps": [
+                {
+                    "ID": "step-1",
+                    "Name": "AI screening",
+                    "HasAgent": True,
+                    "Agents": [{"Name": "Screening agent", "Instructions": {}}],
+                    "Applications": [
+                        {
+                            "ID": "app-1",
+                            "Application": {
+                                "AgentReview": False,
+                                "PaulDecision": None,
+                                "AssignedAt": "2026-09-08T00:00:00Z",
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+    ]
+
+    result = detect_agent_reviews(
+        jobs, now=datetime(2026, 9, 9, 0, tzinfo=timezone.utc)
+    )
+
+    assert len(result) == 1
+    assert result[0]["review_mode"] == "handoff"
+    assert result[0]["handoff_application_count"] == 1
+    assert result[0]["confirmed_application_count"] == 0
+    assert "handed off" in result[0]["recommendation"]
+    assert result[0]["guiding_question"] == "Agent handoff requires verification."
 
 
 def test_detect_suspicious_applications_ignores_normal_step_movement():
@@ -769,6 +837,44 @@ def test_detect_suspicious_applications_marks_three_distinct_ids_high():
 
     assert result[0]["severity"] == "high"
     assert result[0]["application_count"] == 3
+
+
+def test_detect_suspicious_applications_uses_normalized_name_as_secondary_match():
+    jobs = [
+        {
+            "PaulsjobJobID": 99,
+            "PipelineSteps": [
+                {
+                    "Name": "Screening",
+                    "Applications": [
+                        {
+                            "Person": {
+                                "FirstName": "Applicant",
+                                "LastName": "Six",
+                                "PersonSlug": "person-a",
+                            },
+                            "Application": {"ID": ""},
+                        },
+                        {
+                            "Person": {
+                                "FirstName": " applicant ",
+                                "LastName": "SIX",
+                                "PersonSlug": "person-b",
+                            },
+                            "Application": {"ID": ""},
+                        },
+                    ],
+                }
+            ],
+        }
+    ]
+
+    result = detect_suspicious_applications(jobs)
+
+    assert len(result) == 1
+    assert result[0]["match_type"] == "normalized_name"
+    assert result[0]["application_count"] == 2
+    assert "false positive" in result[0]["recommendation"]
 
 
 def test_render_html_report_shows_suspicious_application_metric():

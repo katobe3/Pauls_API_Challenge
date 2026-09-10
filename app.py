@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 from datetime import datetime, timezone
 from html import escape
 from pathlib import Path
 from typing import Any
+import unicodedata
 from urllib.parse import quote
 
 import requests
@@ -22,7 +24,7 @@ REPORT_PATH = Path("report.html")
 BOTTLENECK_MIN_APPLICATIONS = 2
 BOTTLENECK_MIN_SHARE = 0.50
 BOTTLENECK_MIN_RATIO = 2.0
-STUCK_WARNING_DAYS = 3
+STUCK_WARNING_DAYS = 2
 STUCK_CRITICAL_DAYS = 10
 AGENT_REVIEW_WARNING_HOURS = 12
 AGENT_REVIEW_CRITICAL_HOURS = 24
@@ -633,6 +635,16 @@ def _application_field(
     return data.get(field, application.get(field, default))
 
 
+def _application_identifier(application: dict[str, Any]) -> Any:
+    """Return a non-empty application ID, if the API supplied one."""
+
+    for field in ("ID", "ApplicationID", "ApplicationId", "id"):
+        value = _application_field(application, field)
+        if value is not None and str(value).strip():
+            return value
+    return None
+
+
 def _parse_assigned_at(value: Any) -> datetime | None:
     """Parse an API timestamp into an aware UTC datetime."""
 
@@ -778,7 +790,12 @@ def detect_agent_reviews(
             for application in step.get("Applications", []):
                 if not isinstance(application, dict):
                     continue
-                if not _is_true(_application_field(application, "AgentReview")):
+                agent_review_value = _application_field(
+                    application, "AgentReview", None
+                )
+                if not _is_true(agent_review_value) and not (
+                    isinstance(agent_review_value, bool) and not agent_review_value
+                ):
                     continue
                 if _application_field(application, "PaulDecision") is not None:
                     continue
@@ -802,6 +819,11 @@ def detect_agent_reviews(
                         ),
                         "assigned_at": assigned_at_value,
                         "waiting_hours": waiting_hours,
+                        "review_mode": (
+                            "confirmed"
+                            if _is_true(agent_review_value)
+                            else "handoff"
+                        ),
                     }
                 )
 
@@ -842,6 +864,10 @@ def detect_agent_reviews(
     for group in grouped.values():
         applications = group["applications"]
         oldest_waiting_hours = max(item["waiting_hours"] for item in applications)
+        review_modes = {item["review_mode"] for item in applications}
+        review_mode = (
+            next(iter(review_modes)) if len(review_modes) == 1 else "mixed"
+        )
         severity = (
             "high"
             if oldest_waiting_hours >= critical_hours
@@ -854,9 +880,24 @@ def detect_agent_reviews(
                 "severity": severity,
                 "application_count": len(applications),
                 "oldest_waiting_hours": oldest_waiting_hours,
+                "review_mode": review_mode,
+                "confirmed_application_count": sum(
+                    item["review_mode"] == "confirmed" for item in applications
+                ),
+                "handoff_application_count": sum(
+                    item["review_mode"] == "handoff" for item in applications
+                ),
                 "recommendation": (
                     "Review agent execution, system prompt completeness, candidate "
                     "data availability, and API, credit, or rate-limit failures."
+                    if review_mode == "confirmed"
+                    else "Verify that the application was handed off to the agent "
+                    "and review the step configuration or integration."
+                ),
+                "guiding_question": (
+                    "Is agent execution or processing delayed?"
+                    if review_mode == "confirmed"
+                    else "Agent handoff requires verification."
                 ),
             }
         )
@@ -879,6 +920,35 @@ def _person_slug(application: dict[str, Any]) -> str | None:
     return None
 
 
+def _normalize_person_name(value: Any) -> str:
+    """Normalize a name for cautious, case-insensitive comparison."""
+
+    if value is None:
+        return ""
+    without_accents = "".join(
+        character
+        for character in unicodedata.normalize("NFKD", str(value))
+        if not unicodedata.combining(character)
+    )
+    return " ".join(re.findall(r"[a-z0-9]+", without_accents.casefold()))
+
+
+def _person_name_key(application: dict[str, Any]) -> str | None:
+    """Build a normalized first-name/last-name identity for fallback matching."""
+
+    person = application.get("Person")
+    person = person if isinstance(person, dict) else {}
+    first_name = _normalize_person_name(person.get("FirstName"))
+    last_name = _normalize_person_name(person.get("LastName"))
+    if not first_name or not last_name:
+        full_name = _normalize_person_name(person.get("FullName"))
+        parts = full_name.split()
+        if len(parts) >= 2:
+            first_name = first_name or parts[0]
+            last_name = last_name or parts[-1]
+    return f"{first_name}|{last_name}" if first_name and last_name else None
+
+
 def detect_suspicious_applications(
     jobs: list[dict[str, Any]],
     *,
@@ -896,6 +966,7 @@ def detect_suspicious_applications(
         raise ValueError("high_count must be greater than or equal to minimum_count.")
 
     grouped: dict[tuple[str, str], dict[str, Any]] = {}
+    name_grouped: dict[tuple[str, str], dict[str, Any]] = {}
     for job in jobs:
         job_id = job.get("PaulsjobJobID", job.get("JobPositionID", "unknown"))
         for step in job.get("PipelineSteps", []):
@@ -908,18 +979,17 @@ def detect_suspicious_applications(
                 if not isinstance(application, dict):
                     continue
                 slug = _person_slug(application)
-                application_id = _application_field(
-                    application, "ID", application.get("id")
-                )
-                if slug is None or application_id is None:
+                application_id = _application_identifier(application)
+                if slug is None:
                     continue
 
                 key = (str(job_id), slug)
                 group = grouped.setdefault(
                     key,
                     {
-                        "type": "suspicious_application",
-                        "job_id": job_id,
+                    "type": "suspicious_application",
+                    "match_type": "person_slug",
+                    "job_id": job_id,
                         "job_title": job.get("JobPositionTitle"),
                         "person_slug": slug,
                         "candidate_name": (
@@ -930,7 +1000,14 @@ def detect_suspicious_applications(
                         "applications_by_id": {},
                     },
                 )
-                application_key = str(application_id)
+                # Some API responses contain an empty Application.ID. Use the
+                # person slug only as an internal key in that case, while
+                # keeping the displayed application ID unknown.
+                application_key = (
+                    str(application_id)
+                    if application_id is not None
+                    else f"person-slug:{slug}"
+                )
                 detail = group["applications_by_id"].setdefault(
                     application_key,
                     {
@@ -952,6 +1029,33 @@ def detect_suspicious_applications(
                 )
                 step_name = step.get("Name", "Unnamed step")
                 detail["steps"].add(str(step_name))
+
+                name_key = _person_name_key(application)
+                if name_key is not None:
+                    name_group = name_grouped.setdefault(
+                        (str(job_id), name_key),
+                        {
+                            "job_id": job_id,
+                            "job_title": job.get("JobPositionTitle"),
+                            "person_name_key": name_key,
+                            "candidate_name": (
+                                application.get("Person", {}).get("FullName")
+                                if isinstance(application.get("Person"), dict)
+                                else None
+                            ),
+                            "applications_by_id": {},
+                        },
+                    )
+                    name_detail = name_group["applications_by_id"].setdefault(
+                        application_key,
+                        {
+                            "application_id": application_id,
+                            "created_at": detail["created_at"],
+                            "person_slug": _person_slug(application),
+                            "steps": set(),
+                        },
+                    )
+                    name_detail["steps"].add(str(step_name))
 
     anomalies = []
     for group in grouped.values():
@@ -975,6 +1079,53 @@ def detect_suspicious_applications(
                     "Did the candidate intentionally apply more than once?",
                     "Is an external ATS resubmitting applications?",
                     "Should duplicate records be manually consolidated?",
+                ],
+            }
+        )
+
+    slug_alert_keys = {
+        (str(anomaly["job_id"]), anomaly.get("person_slug"))
+        for anomaly in anomalies
+        if anomaly.get("match_type") == "person_slug"
+    }
+    for group in name_grouped.values():
+        applications = list(group["applications_by_id"].values())
+        if len(applications) < minimum_count:
+            continue
+        person_slugs = {
+            application.get("person_slug")
+            for application in applications
+            if application.get("person_slug")
+        }
+        # A same-slug duplicate is already covered by the stronger identity
+        # check. The name layer is for different or unavailable person slugs.
+        if len(person_slugs) == 1 and (
+            str(group["job_id"]), next(iter(person_slugs))
+        ) in slug_alert_keys:
+            continue
+        for application in applications:
+            application["steps"] = sorted(application["steps"])
+        anomalies.append(
+            {
+                "type": "suspicious_application",
+                "match_type": "normalized_name",
+                "job_id": group["job_id"],
+                "job_title": group["job_title"],
+                "candidate_name": group["candidate_name"],
+                "person_name_key": group["person_name_key"],
+                "applications": applications,
+                "application_count": len(applications),
+                "severity": "high" if len(applications) >= high_count else "medium",
+                "recommendation": (
+                    "This name match can be a false positive. Check PersonSlug, "
+                    "application IDs, and timestamps in detail before deciding "
+                    "whether these records represent the same person. Do not "
+                    "delete records automatically."
+                ),
+                "guiding_questions": [
+                    "Could these be two different people with the same name?",
+                    "Do PersonSlug and application timestamps confirm the same person?",
+                    "Should the records be manually reviewed before consolidation?",
                 ],
             }
         )
@@ -1177,15 +1328,28 @@ def _render_agent_reviews(anomalies: list[dict[str, Any]]) -> str:
         severity = anomaly["severity"]
         agent_names = ", ".join(anomaly.get("agent_names", [])) or "Unnamed agent"
         prompt_status = "System prompt configured" if anomaly.get("has_system_prompt") else "System prompt missing"
+        review_mode_labels = {
+            "confirmed": "Confirmed agent backlog",
+            "handoff": "Possible agent delay",
+            "mixed": "Agent review / handoff",
+        }
+        review_mode_label = review_mode_labels.get(
+            anomaly.get("review_mode"), "Agent review"
+        )
         alerts.append(
             '<div class="anomaly">'
             f"<span class=\"status {'negative' if severity == 'high' else 'warning'}\">"
             f"{_text(severity).upper()}</span>"
             "<div>"
-            f"<strong>Agent review · {_text(anomaly.get('step_name'))}</strong>"
+            f"<strong>{_text(review_mode_label)} · "
+            f"{_text(anomaly.get('step_name'))}</strong>"
             f"<p>{anomaly['application_count']} application(s) waiting · "
             f"Agent: {_text(agent_names)} · {_text(prompt_status)}</p>"
             f"<p>Oldest waiting: {anomaly['oldest_waiting_hours']:.1f} hours</p>"
+            f"<p>Confirmed: {anomaly['confirmed_application_count']} · "
+            f"Handoff verification: {anomaly['handoff_application_count']}</p>"
+            f"<p><strong>Guiding question:</strong> "
+            f"{_text(anomaly.get('guiding_question'))}</p>"
             f"<small>{_text(anomaly.get('recommendation'))}</small>"
             "</div></div>"
         )
@@ -1202,7 +1366,9 @@ def _render_suspicious_applications(anomalies: list[dict[str, Any]]) -> str:
         severity = anomaly["severity"]
         application_rows = "".join(
             "<li>"
-            f"<strong>{_text(application.get('application_id'))}</strong> · "
+            f"<strong>Application ID: "
+            f"{_text(application.get('application_id'), 'unavailable')}</strong> · "
+            f"PersonSlug: {_text(application.get('person_slug'), 'unavailable')} · "
             f"{_text(', '.join(application.get('steps', [])))}"
             f" · created {_text(application.get('created_at'))}"
             "</li>"
@@ -1211,6 +1377,12 @@ def _render_suspicious_applications(anomalies: list[dict[str, Any]]) -> str:
         guiding_questions = "".join(
             f"<li>{_text(question)}</li>"
             for question in anomaly.get("guiding_questions", [])
+        )
+        name_match_note = (
+            "<p>Matched by normalized first name and last name; this can produce "
+            "false positives for different people with the same name.</p>"
+            if anomaly.get("match_type") == "normalized_name"
+            else ""
         )
         alerts.append(
             '<div class="anomaly">'
@@ -1221,6 +1393,7 @@ def _render_suspicious_applications(anomalies: list[dict[str, Any]]) -> str:
             f"{_text(anomaly.get('candidate_name'), 'Unknown candidate')}</strong>"
             f"<p>{anomaly['application_count']} distinct applications for this job · "
             f"PersonSlug: {_text(anomaly.get('person_slug'))}</p>"
+            f"{name_match_note}"
             f"<details><summary>Application evidence</summary><ul>{application_rows}</ul></details>"
             f"<details><summary>Guiding questions</summary><ul>{guiding_questions}</ul></details>"
             f"<small>{_text(anomaly.get('recommendation'))}</small>"
