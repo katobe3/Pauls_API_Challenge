@@ -1,93 +1,26 @@
 # PJRI Customer Health Check
 
-An API-driven report that helps PJRI teams quickly assess the technical health of a customer account.
+A Python reporting tool for assessing the operational health of a Paul's Job recruiting account. It retrieves jobs and their recruiting pipelines from the Paul's Job API, identifies candidate-flow and agent-review risks, and writes a self-contained HTML report.
 
-This project implements Option 1 of the PJRI API Challenge. It is designed to turn a customer’s jobs, pipelines, steps, agents, and applications into a concise report that makes configuration problems and candidate-flow anomalies easy to spot.
+ The dashboard summarises jobs, pipelines, applications, and four anomaly categories:
 
-## Why this is useful
+- **Step bottlenecks** — steps holding an unusually large share of a job's applications.
+- **Stuck applications** — applications assigned to their current step for too long.
+- **Agent-review backlog** — applications awaiting an agent decision at an agent-configured step.
+- **Suspicious applications** — multiple distinct applications for the same candidate and job.
 
-Customer health checks are often spread across several screens and require manual comparison. This tool brings the relevant operational signals into one report for technical project managers and customer-facing teams:
+Alerts include severity, supporting evidence, and a suggested investigation or action. The generated report is branded **Customer Health Check** and is written to `report.html` in the repository root.
 
-- Which jobs and pipelines are active?
-- Are expected steps and agents configured?
-- Where are applications accumulating?
-- Are applications stuck in a step beyond the configured threshold?
-- Which jobs need investigation first?
-- Which pipeline steps are acting as application bottlenecks?
+For every job returned by the API, the report shows its assigned pipeline, steps, configured agents and system prompts, and current applications at each step.
 
-## Planned report
+## Requirements
 
-The report will include:
-
-- Customer and generation timestamp
-- Jobs and their assigned pipelines
-- Pipeline step configuration and agent status
-- Application counts by step
-- Stuck-application findings
-- Agent-review backlog
-- Suspicious-application findings
-- Missing or incomplete configuration warnings
-- A summary health status: `healthy`, `needs_attention`, or `critical`
-
-Example output:
-
-```json
-{
-  "customer_id": "customer_123",
-  "health": "needs_attention",
-  "summary": {
-    "jobs_checked": 4,
-    "pipelines_checked": 4,
-    "applications_checked": 186,
-    "anomalies": 2
-  },
-  "anomalies": [
-    {
-      "type": "stuck_application",
-      "job_id": "job_456",
-      "step": "Phone screen",
-      "count": 12,
-      "threshold_days": 7
-    }
-  ]
-}
-```
-
-## Status
-
-The repository includes a small Python API client. It calls the jobs search endpoint, follows all result pages, enriches each job with its pipeline template name, step templates, agent presence, agent system prompts, and current applications per step. It then generates a static HTML report.
-
-The dashboard is branded “API Challenge · Technical Project Manager PJRI · KTB” and titled “CUSTOMER HEALTH CHECK”. Its summary is grouped into a Recruiting pipeline overview (Jobs, Pipelines, Applications) and Anomalies (Step bottlenecks, Stuck applications, Agent review backlog, and Suspicious applications). The four anomaly metrics count affected application records rather than only affected jobs: bottlenecks count applications in flagged steps, stuck applications count affected application records, agent review counts waiting applications, and suspicious applications count distinct duplicate application IDs. Medium anomalies use amber styling and high-severity anomalies use red styling. Each alert includes its severity, triggering evidence, and a suggested action or guiding question.
-
-```text
-.
-├── README.md
-├── .env.example
-├── .gitignore
-├── app.py
-├── requirements.txt
-└── tests/
-    └── test_app.py
-```
+- Python 3.10 or later
+- A Paul's Job company API key
 
 ## Setup
 
-1. Create a free account at [app.paulsjob.ai](https://app.paulsjob.ai/).
-2. Generate a personal API key in the account settings.
-3. Copy the environment template:
-
-   ```bash
-   cp .env.example .env
-   ```
-
-4. Add the key to `.env`:
-
-   ```dotenv
-   PAULSJOB_API_KEY=your_api_key_here
-   PAULSJOB_BASE_URL=https://api.paulsjob.ai/dev
-   ```
-
-5. Create and activate a virtual environment, then install the dependencies:
+1. Create a virtual environment and install the dependencies:
 
    ```bash
    python3 -m venv .venv
@@ -95,114 +28,51 @@ The dashboard is branded “API Challenge · Technical Project Manager PJRI · K
    python -m pip install -r requirements.txt
    ```
 
-6. Run the API smoke test:
+2. Create a local environment file:
 
    ```bash
-   python app.py
+   cp .env.example .env
    ```
 
-   The app creates `report.html` in the repository root. It includes a summary dashboard and detailed job cards showing pipelines, steps, agents and their system prompts, expandable current-application lists, and anomaly alerts. Step bottlenecks require at least 2 applications and either at least 50% of the job’s applications or at least twice the average volume of the other steps. High severity starts at 75% of the job’s applications or 4× the average of other steps. Alerts also compare the same step name across distinct pipeline templates and include guiding questions for investigation. Stuck applications use `AssignedAt` with a 2-day warning threshold and a 10-day critical threshold; human- or agent-review items beyond the warning threshold are high severity. Because the current application response does not provide complete transition history, the report treats an application returned under a step as still being in that step. Agent-review alerts require a null `PaulDecision`, a configured step agent, and at least 12 hours in the step. `AgentReview == true` is shown as a confirmed agent backlog with the question “Is agent execution or processing delayed?”; `AgentReview == false` is shown separately as a possible agent delay with the guiding question “Agent handoff requires verification.” Both are high severity after 24 hours or when multiple applications are waiting on the same step or agent. Suspicious-application alerts first group records by job and `PersonSlug`, then use normalized first name + last name as a secondary match. They count distinct application identities, use medium severity for 2 applications and high severity for 3 or more, and label name-based matches as possible duplicates because they may be false positives. Repeated appearances of the same application ID across steps are treated as normal pipeline movement. The client requests up to 100 jobs per page, follows `TotalPage` until every page has been collected, and looks up each unique pipeline using `GET /recruiting/job-step-templates/pipelines/{pipeline_template_id}`, its steps using `GET /recruiting/job-step-templates/pipelines/{pipeline_template_id}/steps`, each step’s agents using `GET /recruiting/job-step-templates/pipelines/{pipeline_template_id}/steps/{step_template_id}/agents`, and applications using `POST /recruiting/applications/search-applications` filtered by job ID and current step name.
+3. Set the API key in `.env`:
 
-7. Run the tests without making a network request:
-
-   ```bash
-   python -m pytest
+   ```dotenv
+   PAULSJOB_API_KEY=your_api_key_here
+   PAULSJOB_BASE_URL=https://api.paulsjob.ai/dev
    ```
 
-The API key must only be read from the environment. It must never be committed, printed in logs, or included in example output.
+`PAULSJOB_BASE_URL` is optional and defaults to `https://api.paulsjob.ai/dev/v1`.
 
-## API areas used
+## Generate a report
 
-The implementation uses the Paul's Job API resources required to construct a customer health report:
+```bash
+python app.py
+```
+
+On success, the command prints the report location and creates `report.html`. Open that file in a browser to review the dashboard and job-level details.
+
+## Detection rules
+
+| Finding | Rule | Severity |
+| --- | --- | --- |
+| Step bottleneck | At least 2 applications in a step, and either at least 50% of the job's applications or at least 2× the average of the other steps. | High at 75% of applications or 4× the other-step average; otherwise medium. |
+| Stuck application | An application has been assigned to its current step for at least 2 days. | High at 10 days, or when human or agent review is active; otherwise medium. |
+| Agent-review backlog | A step has an agent, an application has no `PaulDecision`, is marked for agent review or handoff, and has waited at least 12 hours. | High at 24 hours or when at least 2 applications wait at the same step; otherwise medium. |
+| Suspicious application | Two or more distinct application IDs belong to the same `PersonSlug` and job. A normalized first-name/last-name match is also reported as a possible duplicate. | High for 3 or more applications; otherwise medium. |
+
+## API resources used
 
 | Resource | Purpose |
 | --- | --- |
-| Customers | Identify the account being checked and scope related data |
-| Jobs | Fetch jobs belonging to the customer |
-| Pipelines | Resolve the pipeline assigned to each job |
-| Steps | Inspect ordering, names, and configuration |
-| Agents | Check whether configured agents are present and active |
-| Applications | Aggregate candidate counts by pipeline step and identify aging records |
+| `POST /recruiting/jobs/search-jobs` | Retrieve every job. |
+| `GET /recruiting/job-step-templates/pipelines/{pipeline_template_id}` | Resolve a pipeline name. |
+| `GET /recruiting/job-step-templates/pipelines/{pipeline_template_id}/steps` | Retrieve pipeline steps. |
+| `GET /recruiting/job-step-templates/pipelines/{pipeline_template_id}/steps/{step_template_id}/agents` | Retrieve configured agents and their system prompts. |
+| `POST /recruiting/applications/search-applications` | Retrieve applications currently assigned to each job step. |
 
-The current client calls `POST /recruiting/jobs/search-jobs`. Authentication uses the `x-company-api-key` header with the company API key. The current smoke test sends an empty JSON object; add the request fields required by the jobs search schema in `app.py` once the filters are confirmed. The [Paul's Job API OpenAPI documentation](https://api.paulsjob.ai/dev/docs) is the source of truth for that schema.
+## Security and limitations
 
-## Health rules
-
-The report should make its rules explicit and deterministic. The initial rules are:
-
-- `critical`: a job has no pipeline, or a required pipeline step/agent is missing.
-- `needs_attention`: applications have remained in the same step longer than the configured threshold, or an API response is incomplete.
-- `healthy`: no critical configuration issue or configured aging anomaly was found.
-
-The stuck-application threshold should be configurable rather than hard-coded. The current defaults are 2 days for warning and 10 days for critical, with the report showing the evidence used for every finding.
-
-### 4. Suspicious applications
-
-Definition: a candidate appears multiple times for the same job.
-
-The primary rule flags records when the same `PersonSlug` appears more than once for the same job with distinct application IDs. Repeated appearances of one application ID across multiple pipeline steps are treated as normal pipeline movement.
-
-Because the API can contain separate person records with the same name, a secondary rule also matches normalized first name + last name. Name-based matches are labeled as possible duplicates because they can produce false positives.
-
-Suggested thresholds:
-
-- `medium`: 2 distinct applications for the same candidate and job
-- `high`: 3 or more distinct applications
-
-The HTML report groups alerts by candidate and job and shows the duplicate or active-application count, application IDs when available, `PersonSlug` values, job context, creation timestamps, severity, and recommended actions. Name-based alerts specifically ask the reviewer to compare `PersonSlug`, application IDs, and timestamps before deciding whether the records represent the same person. Duplicate records are never deleted automatically; they are marked for manual review or consolidation.
-
-## Error handling
-
-The API client should:
-
-- Fail fast when `PAULSJOB_API_KEY` is missing.
-- Use request timeouts and bounded retries for transient `5xx` and rate-limit responses.
-- Preserve the HTTP status and request context in actionable error messages.
-- Handle pagination until all relevant records are fetched.
-- Treat missing optional fields as unknown instead of silently converting them to healthy.
-- Return a non-zero exit code when the report cannot be trusted.
-- Redact authorization headers and API keys from logs.
-
-Partial results should be clearly marked as partial; they should not be presented as a healthy account.
-
-## Assumptions and limitations
-
-- A customer is the reporting boundary; jobs and applications are evaluated only within that account.
-- An application is considered stuck based on time since the latest step transition, not time since application creation.
-- The initial version reports anomalies and does not modify jobs, pipelines, candidates, or agent configuration.
-- Health thresholds may need to vary by customer, job type, or pipeline and should become configuration in a production version.
-- The report depends on the API exposing enough timestamps and relationships to connect applications to pipeline steps.
-
-## Example command
-
-The intended CLI shape is:
-
-```bash
-python -m src.cli health-check --customer-id customer_123 --format json
-```
-
-Supported output formats should include JSON for automation and a human-readable table or HTML report for customer reviews.
-
-## Testing approach
-
-The client and health rules should be tested independently using mocked API responses. Important cases include:
-
-- Multiple pages of jobs and applications
-- Empty customers and jobs without pipelines
-- Missing agents or steps
-- Applications over and under the stuck threshold
-- Rate limits, timeouts, malformed responses, and server errors
-- Redaction of API keys from errors and logs
-
-## Next steps
-
-1. Implement the typed API client from the OpenAPI schemas.
-2. Add pagination and retry handling.
-3. Implement the health rules as independently testable functions.
-4. Add JSON and human-readable report renderers.
-5. Add fixtures based on sanitized test data and document a real sample run.
-6. Add structured logging and optional report persistence for recurring customer checks.
-
-## Security
-
-Never commit an API key. Keep `.env` in `.gitignore`, commit only `.env.example`, and check generated reports and screenshots for customer or credential data before sharing them.
+- Keep `PAULSJOB_API_KEY` only in your local `.env`; do not commit it or share generated reports containing customer data.
+- Error messages deliberately omit authorization headers and API keys.
+- “Stuck” time is calculated from `AssignedAt`. The API does not provide full transition history, so an application returned under a step is treated as currently in that step.
+- Name-based duplicate matches can be false positives and are explicitly labelled as possible duplicates. No data is deleted or consolidated automatically.

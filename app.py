@@ -16,7 +16,7 @@ import requests
 from dotenv import load_dotenv
 
 
-DEFAULT_BASE_URL = "https://api.paulsjob.ai/dev"
+DEFAULT_BASE_URL = "https://api.paulsjob.ai/dev/v1"
 ENDPOINT = "/recruiting/jobs/search-jobs"
 PIPELINE_TEMPLATE_ENDPOINT = "/recruiting/job-step-templates/pipelines"
 APPLICATION_ENDPOINT = "/recruiting/applications/search-applications"
